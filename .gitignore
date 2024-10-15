@@ -1,0 +1,6 @@
+**/__pycache__
+**/pyndg.egg-info
+build
+dist
+*.log
+*.msh
