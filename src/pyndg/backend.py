@@ -16,6 +16,10 @@ if "PYNDG_BACKEND" in os.environ:
         BACKEND = NUMPY
     elif backend_str == "torch":
         BACKEND = TORCH
+        if torch.cuda.is_available():
+            DEVICE = "cuda"
+        else:
+            DEVICE = "cpu"
     elif backend_str == "jax":
         BACKEND = JAX
     else:
@@ -59,6 +63,8 @@ def th_to_const(x):
     else:
         x = bkd.tensor(x).clone().detach()
 
+    x = x.to(DEVICE)
+
     if x.dtype in [torch.float64, torch.float32]:
         if x.dtype != PREC:
             return x.to(PREC)
@@ -81,7 +87,7 @@ def to_const(x):
 TO_VARIABLE = np.array(
     [
         lambda x: x,
-        lambda x: bkd.tensor(x, requires_grad=True, device="cpu"),
+        lambda x: bkd.tensor(x, requires_grad=True, device=DEVICE),
         lambda x: x,
     ]
 )

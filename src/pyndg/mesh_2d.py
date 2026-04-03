@@ -479,14 +479,6 @@ class Mesh2D:
             )
         )
 
-        if bkd.BACKEND == bkd.TORCH:
-            # tmp = self.meshgrid_interp.todense()
-            self.meshgrid_interp = bk.sparse_coo_tensor(
-                self.meshgrid_interp_ijv[:, :2].T.astype(int),
-                self.meshgrid_interp_ijv[:, 2],
-            ).coalesce()
-            # assert np.all(tmp == self.meshgrid_interp.to_dense().numpy())
-
     def __compute_nodes(self):
         self.xrs, self.yrs = nodes_2d(self.N)
         self.r, self.s = xytors(self.xrs, self.yrs)
@@ -952,6 +944,13 @@ class Mesh2D:
                 .coalesce()
             )
 
+        if bkd.BACKEND == bkd.JAX:
+            data = np.ones((idx,))
+            indices = np.stack([ij[:idx, 0], ij[:idx, 1]], axis=1)
+            from jax.experimental import sparse as jsparse
+
+            self.VToE = jsparse.BCOO((data, indices), shape=self.VToE.shape)
+
     def __compute_interpolation_matrix2(self):
         coov = np.stack(
             [
@@ -998,6 +997,15 @@ class Mesh2D:
                 )
                 .to(bkd.PREC)
                 .coalesce()
+            )
+
+        if bkd.BACKEND == bkd.JAX:
+            data = self.interp_matrix.data
+            indices = np.stack([self.interp_matrix.row, self.interp_matrix.col], axis=1)
+            from jax.experimental import sparse as jsparse
+
+            self.interp_matrix = jsparse.BCOO(
+                (data, indices), shape=self.interp_matrix.shape
             )
 
     def __compute_essential_bc(self):
