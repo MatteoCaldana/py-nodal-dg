@@ -8,11 +8,13 @@ class BC(Enum):
     Dirichlet = 2
     Neumann = 3
 
+
 def inv_BC(bc):
     if bc == BC.Neumann:
         return BC.Dirichlet
     else:
         return BC.Neumann
+
 
 def apply_BC_1D(u, bc):
     if bc[0][0] == BC.Periodic:

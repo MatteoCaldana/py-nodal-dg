@@ -140,14 +140,14 @@ PHYSIC_MODEL_1D_TABLE = {"Advection": Advection1D(), "Burgers": Burgers1D()}
 
 class Advection2D(PhysicModel2D):
     C = bkd.to_const(np.array([1, 1]))
-    
+
     @staticmethod
     def idd(u):
         return u
 
     @staticmethod
     def eig(u):
-        return bk.sqrt(bk.sum(Advection2D.C ** 2))
+        return bk.sqrt(bk.sum(Advection2D.C**2))
 
     @staticmethod
     def flux(u):

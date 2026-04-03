@@ -28,7 +28,7 @@ def convergence(plot=False):
                     model=Advection2D(),
                     name="Test",
                     N=NN[j],
-                    mesh_file=((0, 0), (1, 1), (KK[i],)*2),
+                    mesh_file=((0, 0), (1, 1), (KK[i],) * 2),
                     u_IC=sol,
                     bc={int(k + 1e5): BC.Periodic for k in [1, 2, 3, 4]},
                     final_time=0.5,
@@ -44,6 +44,7 @@ def convergence(plot=False):
             T = problem.params.final_time
             u_ex = sol(problem.mesh.x - T, problem.mesh.y - T)
             e = u_ex - problem.u
+
             def norm(x):
                 return np.sqrt(np.sum((x.T @ problem.mesh.M) * x.T))
 
@@ -56,7 +57,8 @@ def convergence(plot=False):
 
 if __name__ == "__main__":
     import pyndg.backend as bkd
+
     assert bkd.BACKEND == bkd.NUMPY
-    
+
     tab, conv = convergence(plot=2)
     plt.show()

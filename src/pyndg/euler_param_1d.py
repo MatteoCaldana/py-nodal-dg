@@ -14,7 +14,7 @@ from .backend import bkd as bk
 class EulerPhysics1D(PhysicModel1D):
     def __init__(self, gas_gamma):
         self.gas_gamma = gas_gamma
-        
+
     def idd(self, u):
         return u[0]
 

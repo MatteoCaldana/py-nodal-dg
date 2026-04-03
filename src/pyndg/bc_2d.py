@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from enum import IntEnum
 
+
 class BC(IntEnum):
     In = 1
     Out = 2

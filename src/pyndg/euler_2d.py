@@ -59,7 +59,9 @@ class Euler2D:
             print("WARNING: stepping after final time.")
 
         self.wave_speed = self._wave_speed()
-        self.max_courant = max(self.max_courant, self.wave_speed.max() * self.dt / self.mesh.min_hK)
+        self.max_courant = max(
+            self.max_courant, self.wave_speed.max() * self.dt / self.mesh.min_hK
+        )
         self.mu_raw = self.params.viscosity_model.compute(
             self.u,
             self.u_old,
@@ -182,19 +184,19 @@ class Euler2D:
             [uPuMuPM2[i][1] for i in range(4)]
         )
         # Compute maximum wave speed on edges
-        
+
         # !!! WARNING
         # computations are cut short due to automatic differentiation
         # problems in this part
         COMPUTE_CORRECT_WAVE_SPEED = False
         if COMPUTE_CORRECT_WAVE_SPEED:
             lam = bk.maximum(
-                bk.sqrt(vuM * vuM + vvM * vvM) 
+                bk.sqrt(vuM * vuM + vvM * vvM)
                 + bk.sqrt(bk.abs(self.params.gas_gamma * pM / rhoM)),
                 bk.sqrt(vuP * vuP + vvP * vvP)
                 + bk.sqrt(bk.abs(self.params.gas_gamma * pP / rhoP)),
             )
-    
+
             max_lam_edges = []
             for i in range(lam.shape[0] // self.mesh.Nfp):
                 max_lam_edge = bkd.maxval(
@@ -204,12 +206,12 @@ class Euler2D:
                 for _ in range(self.mesh.Nfp):
                     max_lam_edges.append(max_lam_edge)
             lam = bk.vstack(max_lam_edges)
-            
+
         else:
             INFTY = 8
             lambda_M = bk.sqrt(self.params.gas_gamma * pM / rhoM) + 0.3757
             lambda_P = bk.sqrt(self.params.gas_gamma * pP / rhoP) + 0.3757
-            lam = (lambda_M ** INFTY + lambda_P ** INFTY) ** (1 / INFTY)
+            lam = (lambda_M**INFTY + lambda_P**INFTY) ** (1 / INFTY)
         ###
         bd_flux = [
             self._calculate_bd_flux(

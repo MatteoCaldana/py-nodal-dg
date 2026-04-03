@@ -7,7 +7,7 @@ TOL = 2e-5
 
 
 def check_type(sself):
-    for (name, field_type) in sself.__annotations__.items():
+    for name, field_type in sself.__annotations__.items():
         if typing.get_origin(field_type) is typing.Union:
             any_true = False
             for utype in typing.get_args(field_type):

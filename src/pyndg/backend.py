@@ -15,7 +15,9 @@ if "PYNDG_BACKEND" in os.environ:
     else:
         raise ValueError(f"PYNDG_BACKEND={backend_str} is not a valid backend")
 else:
-    print("WARNING: could not find env variable 'PYNDG_BACKEND', setting by default to torch")
+    print(
+        "WARNING: could not find env variable 'PYNDG_BACKEND', setting by default to torch"
+    )
     BACKEND = TORCH
 
 if BACKEND == NUMPY:

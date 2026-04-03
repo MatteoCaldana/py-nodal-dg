@@ -14,15 +14,15 @@ if __name__ == "__main__":
     x = p.mesh.x.flatten()
     y = p.mesh.y.flatten()
     rho = p.u[0].flatten()
-    
+
     plt.figure()
     cs = plt.tricontourf(x, y, rho, cmap="jet", levels=30)
     plt.gcf().colorbar(cs)
     plt.ylim([-0.5, 0.5])
     plt.xlim([-0.5, 0.5])
-    
+
     plt.figure()
-    plt.tricontour(x, y, rho, levels=50, colors='black')
+    plt.tricontour(x, y, rho, levels=50, colors="black")
     plt.ylim([-0.5, 0.5])
     plt.xlim([-0.5, 0.5])
 

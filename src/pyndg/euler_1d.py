@@ -2,7 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from . import  backend as bkd
+from . import backend as bkd
 from .backend import bkd as bk
 
 from .euler_param_1d import EulerParam1D
@@ -60,7 +60,9 @@ class Euler1D:
         )
         c_sound = bk.sqrt(bk.abs(self.params.gas_gamma * pre / self.u[0]))
         local_wave_sp = bkd.maxval(c_sound + bk.abs(self.u[1] / self.u[0]), axis=0)
-        self.max_courant = max(self.max_courant, local_wave_sp.max() * self.dt / self.mesh.min_hK)
+        self.max_courant = max(
+            self.max_courant, local_wave_sp.max() * self.dt / self.mesh.min_hK
+        )
         self.mu_raw = self.params.viscosity_model.compute(
             self.u,
             self.u_old,
@@ -89,7 +91,7 @@ class Euler1D:
                 self.speed = bk.max(c_sound + bk.abs(self.u[1] / self.u[0]))
                 self.dt = self.params.cfl / (
                     self.speed * self.mesh.N2 / self.mesh.min_hK
-                    + mu_max * self.mesh.N2 ** 2 / self.mesh.min_hK ** 2
+                    + mu_max * self.mesh.N2**2 / self.mesh.min_hK**2
                 )
 
         self.u_old_old = self.u_old
@@ -103,7 +105,6 @@ class Euler1D:
             self.done = True
         self.iter += 1
         return not self.done
-
 
     def __get_flux_q(self, i, u):
         u_ext = apply_BC_1D(
@@ -249,7 +250,7 @@ def get_problem(viscosity_model, m, n, k, c, u, sv):
             ((BC.Dirichlet, 10.141852), (BC.Dirichlet, 0.0)),
             ((BC.Dirichlet, 39.166661), (BC.Neumann, 0.0)),
         ]
-        bnd=(-5.0, 5.0)
+        bnd = (-5.0, 5.0)
     elif u == "SodTube":
         rho_IC = rst
         vel_IC = vst
@@ -259,7 +260,7 @@ def get_problem(viscosity_model, m, n, k, c, u, sv):
             ((BC.Dirichlet, 0.0), (BC.Dirichlet, 0.0)),
             ((BC.Dirichlet, 2.5), (BC.Dirichlet, 0.25)),
         ]
-        bnd=(0.0, 1.0)
+        bnd = (0.0, 1.0)
     else:
         raise NotImplementedError("")
 

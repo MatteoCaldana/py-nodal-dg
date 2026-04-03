@@ -12,6 +12,7 @@ from pyndg.viscosity_model import NoViscosity
 from pyndg.time_integrator import LS54
 from pyndg.bc_1d import BC
 
+
 def calc_convergence(KK, table, plot):
     convergence = np.diff(np.log(table), axis=0) / -np.diff(np.log(KK))[:, None]
     if plot:
@@ -34,7 +35,7 @@ def calc_convergence(KK, table, plot):
             fontsize=12,
         )
         plt.tight_layout()
-        plt.xlim([min(2e-2, min(1/KK)*0.8), 0.3])
+        plt.xlim([min(2e-2, min(1 / KK) * 0.8), 0.3])
     return convergence
 
 
@@ -92,6 +93,7 @@ def test_convergence_linear_advection():
 
 if __name__ == "__main__":
     import pyndg.backend as bkd
+
     assert bkd.BACKEND == bkd.NUMPY
 
     t0 = time.time()

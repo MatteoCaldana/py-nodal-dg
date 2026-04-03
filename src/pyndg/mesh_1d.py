@@ -46,7 +46,7 @@ def jacobiGQ(alpha, beta, N):
         return np.array([(beta - alpha) / (alpha + beta + 2)]), np.array([2])
     else:
         h1 = 2 * np.arange(0, N + 1) + alpha + beta
-        J = np.diag(-0.5 * (alpha ** 2 - beta ** 2) / (h1 + 2) / h1) + np.diag(
+        J = np.diag(-0.5 * (alpha**2 - beta**2) / (h1 + 2) / h1) + np.diag(
             2.0
             / (h1[:N] + 2)
             * np.sqrt(
@@ -120,7 +120,7 @@ def jacobiP(x, alpha, beta, N):
                 / (h1 + 3)
             )
         )
-        bnew = -(alpha ** 2 - beta ** 2) / h1 / (h1 + 2)
+        bnew = -(alpha**2 - beta**2) / h1 / (h1 + 2)
         PL[i + 2, :] = 1 / anew * (-aold * PL[i, :] + (xp - bnew) * PL[i + 1, :])
         aold = anew
     return PL[N, :].reshape((n,))
@@ -152,7 +152,7 @@ class Mesh1D:
     def __init__(self, params):
         # assert isinstance(params, ScalarParam1D)
         self.N = params.N
-        self.N2 = np.array(self.N ** 2, dtype=np.float64)
+        self.N2 = np.array(self.N**2, dtype=np.float64)
         self.K = params.K
         self.bnd = params.bnd
         self.bnd_l = params.bnd[0]
