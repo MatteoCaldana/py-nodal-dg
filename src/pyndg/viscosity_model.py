@@ -7,9 +7,6 @@ import math
 from .backend import bkd as bk
 from . import backend as bkd
 
-if bkd.BACKEND == bkd.TORCH:
-    import torch as th
-
 from .utils import check_type
 from .bc_1d import BC, apply_BC_1D
 
