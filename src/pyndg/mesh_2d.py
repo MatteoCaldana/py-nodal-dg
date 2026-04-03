@@ -943,10 +943,14 @@ class Mesh2D:
         self.neighbors[:] = np.sum(self.VToE, axis=1).reshape((-1,))
 
         if bkd.BACKEND == bkd.TORCH:
-            self.VToE = bk.sparse_coo_tensor(
-                ij[:idx, :2].T.astype(int),
-                np.ones((idx,)),
-            ).coalesce()
+            self.VToE = (
+                bk.sparse_coo_tensor(
+                    ij[:idx, :2].T.astype(int),
+                    np.ones((idx,)),
+                )
+                .to(bkd.PREC)
+                .coalesce()
+            )
 
     def __compute_interpolation_matrix2(self):
         coov = np.stack(
@@ -984,12 +988,16 @@ class Mesh2D:
         self.interp_matrix = (self.coov_dof @ self.coov_inv).tocoo()
 
         if bkd.BACKEND == bkd.TORCH:
-            self.interp_matrix = bk.sparse_coo_tensor(
-                indices=bk.tensor(
-                    [self.interp_matrix.row, self.interp_matrix.col], dtype=bk.int64
-                ),
-                values=self.interp_matrix.data,
-                size=self.interp_matrix.shape,
+            self.interp_matrix = (
+                bk.sparse_coo_tensor(
+                    indices=bk.tensor(
+                        [self.interp_matrix.row, self.interp_matrix.col], dtype=bk.int64
+                    ),
+                    values=self.interp_matrix.data,
+                    size=self.interp_matrix.shape,
+                )
+                .to(bkd.PREC)
+                .coalesce()
             )
 
     def __compute_essential_bc(self):

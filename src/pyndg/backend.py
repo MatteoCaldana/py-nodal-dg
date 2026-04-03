@@ -41,19 +41,34 @@ else:
 
 if PREC == "f64":
     if BACKEND == TORCH:
+        PREC = torch.float64
         bkd.set_default_dtype(bkd.float64)
     if BACKEND == JAX:
         jax.config.update("jax_enable_x64", True)
+elif PREC == "f32":
+    if BACKEND == TORCH:
+        PREC = torch.float32
+
+else:
+    raise ValueError(f"Unknown precision {PREC}")
+
+
+def th_to_const(x):
+    if isinstance(x, bkd.Tensor):
+        x = x.clone().detach()
+    else:
+        x = bkd.tensor(x).clone().detach()
+
+    if x.dtype in [torch.float64, torch.float32]:
+        if x.dtype != PREC:
+            return x.to(PREC)
+    return x
 
 
 TO_CONST = np.array(
     [
         lambda x: x,
-        lambda x: (
-            x.clone().detach()
-            if isinstance(x, bkd.Tensor)
-            else bkd.tensor(x).clone().detach()
-        ),
+        th_to_const,
         lambda x: x,
     ]
 )
