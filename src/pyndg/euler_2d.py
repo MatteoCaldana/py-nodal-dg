@@ -10,6 +10,10 @@ from .viscosity_model import bound_and_smooth_viscosity_2d
 from .time_integrator import LS54
 import functools
 
+import time
+from collections import defaultdict
+import statistics
+
 
 @functools.partial(bkd.jit, static_argnums=(3, 4))
 def calculate_uPM(u, vmapP_C, vmapM_C, vmapP_shape, vmapM_shape):
@@ -90,6 +94,8 @@ class Euler2D:
         if not manual_reset:
             self.reset()
 
+        self.profiler = defaultdict(list)
+
     def reset(self, state=None):
         if not self.mesh.is_init:
             self.mesh.initialize()
@@ -130,6 +136,16 @@ class Euler2D:
         if self.time - self.params.final_time > 0:
             print("WARNING: stepping after final time.")
 
+        print(f"{'Metric':<30} | {'Median Time (s)':<15}")
+        print("-" * 50)
+        for key, times in self.profiler.items():
+            if times:
+                median_time = statistics.median(times)
+                print(f"{key:<30} | {median_time:<15.6f}")
+            else:
+                print(f"{key:<30} | {'No data':<15}")
+
+        t0 = time.time()
         self.wave_speed = self._wave_speed()
         self.max_courant = max(
             self.max_courant, self.wave_speed.max() * self.dt / self.mesh.min_hK
@@ -160,6 +176,9 @@ class Euler2D:
                     + mu_max * self.mesh.N2**2 / self.mesh.min_hK**2
                 )
 
+        self.profiler["mu_compute"].append(time.time() - t0)
+
+        t0 = time.time()
         self.u_old_old = self.u_old
         self.u_old, self.u = (  # idiomatic swap
             self.u,
@@ -170,12 +189,15 @@ class Euler2D:
         if self.time - self.params.final_time >= 0:
             self.done = True
         self.iter += 1
+
+        self.profiler["integration"].append(time.time() - t0)
         return not self.done
 
     def _rhs_weak(self, u):
         # TODO: implement non periodic BC
 
         # Solution traces
+        t0 = time.time()
         uPuMuPM2 = [
             calculate_uPM(
                 u[i],
@@ -186,8 +208,11 @@ class Euler2D:
             )
             for i in range(4)
         ]
+        self.profiler["solution_traces"].append(time.time() - t0)
+
         # Compute numerical fluxes of auxiliary equation
-        bd_flux = [
+        t0 = time.time()
+        bd_flux_aux = [
             calculate_bd_flux_comp(
                 uPuMuPM2[i][2],
                 self.mesh.LIFT,
@@ -197,7 +222,10 @@ class Euler2D:
             )
             for i in range(4)
         ]
+        self.profiler["aux_bd_flux"].append(time.time() - t0)
+
         # Compute internal fluxes for auxiliary variable
+        t0 = time.time()
         int_flux_c = [
             calculate_int_flux_comp(
                 u[i],
@@ -210,8 +238,11 @@ class Euler2D:
             )
             for i in range(4)
         ]
+        self.profiler["aux_int_flux"].append(time.time() - t0)
+
         # Compute auxiliary variables with viscosity and variable traces
-        q = [[bd_flux[i][j] - int_flux_c[i][j] for j in range(2)] for i in range(4)]
+        t0 = time.time()
+        q = [[bd_flux_aux[i][j] - int_flux_c[i][j] for j in range(2)] for i in range(4)]
         gXgYgXPMgYPM = [
             calculate_gs(
                 q[i][0],
@@ -223,9 +254,15 @@ class Euler2D:
             )
             for i in range(4)
         ]
+        self.profiler["aux_vars_gs"].append(time.time() - t0)
+
         # Compute volume contributions
+        t0 = time.time()
         _, _, _, _, Fu, Gu = compute_flux(self.params.model, u)
+        self.profiler["volume_flux"].append(time.time() - t0)
+
         # Compute weak derivatives
+        t0 = time.time()
         dFdrdFdsdGdrdGds = [
             calculate_dGdF(Fu[i], Gu[i], self.mesh.Drw, self.mesh.Dsw) for i in range(4)
         ]
@@ -242,14 +279,20 @@ class Euler2D:
             )
             for i in range(4)
         ]
+        self.profiler["weak_derivatives"].append(time.time() - t0)
+
         # Evaluate primitive variables & flux functions
+        t0 = time.time()
         rhoP, vuP, vvP, pP, FuP, GuP = compute_flux(
             self.params.model, [uPuMuPM2[i][0] for i in range(4)]
         )
         rhoM, vuM, vvM, pM, FuM, GuM = compute_flux(
             self.params.model, [uPuMuPM2[i][1] for i in range(4)]
         )
+        self.profiler["trace_flux"].append(time.time() - t0)
+
         # Compute maximum wave speed on edges
+        t0 = time.time()
         lam = bk.maximum(
             bk.sqrt(vuM * vuM + vvM * vvM)
             + bk.sqrt(bk.abs(self.params.gas_gamma * pM / rhoM)),
@@ -260,13 +303,15 @@ class Euler2D:
         max_lam_edges = []
         for i in range(lam.shape[0] // self.mesh.Nfp):
             max_lam_edge = bkd.maxval(
-                lam[i * self.mesh.Nfp : (i + 1) * self.mesh.Nfp, :],
-                axis=0,
+                lam[i * self.mesh.Nfp : (i + 1) * self.mesh.Nfp, :], axis=0
             )
             for _ in range(self.mesh.Nfp):
                 max_lam_edges.append(max_lam_edge)
         lam = bk.vstack(max_lam_edges)
+        self.profiler["wave_speed"].append(time.time() - t0)
 
+        # Compute final boundary flux and assembly
+        t0 = time.time()
         bd_flux = [
             calculate_bd_flux(
                 FuP[i],
@@ -286,6 +331,8 @@ class Euler2D:
             for i in range(4)
         ]
         rhsu = bk.stack([int_flux[i] - bd_flux[i] for i in range(4)])
+        self.profiler["rhs_assembly"].append(time.time() - t0)
+
         return rhsu
 
 
