@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools", "wheel"] 
+build_backend = "setuptools.build_meta"
+[project]
+name = "pyndg" 
+version = "0.1.0" 
+description = "A small package to use nodal discontinuosu Galerking with AD."
+authors = [{name = "Matteo Caldana", email = "matteo.caldana@polimi.it"}]
+requires-python = ">=3.12"
+dependencies = ["numpy", "torch", "matplotlib"]
+[project.optional-dependencies]
+dev = ["pytest", "black"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
