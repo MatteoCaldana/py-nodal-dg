@@ -20,7 +20,7 @@ def lerp_1d_visc(mu, mesh):
 
 def smooth_viscosity(mu, mesh):
     mu = mu.reshape((-1,))
-    o = bk.ones((mesh.x.shape[0], 1))
+    o = bk.ones_like(mesh.x[:, 0:1])
     mu_ext = bk.stack([mu[0], *mu, mu[-1]])
     mu_left = (mu_ext[:-2] + mu_ext[1:-1]).reshape((1, -1)) / 2
     mu_right = (mu_ext[1:-1] + mu_ext[2:]).reshape((1, -1)) / 2
@@ -204,9 +204,7 @@ class EV2D(ViscosityModel2D):
             bkd.reshape(FXP - FXM, mesh.nx.shape, order="F") * mesh.nx
             + bkd.reshape(FYP - FYM, mesh.ny.shape, order="F") * mesh.ny
         ) / (
-            2
-            * bk.matmul(bk.ones(((mesh.N + 1) * 3, 1)), mesh.dx2.reshape((1, -1)))
-            / mesh.N
+            2 * bk.matmul(bk.ones_like(FXP[:, 0:1]), mesh.dx2.reshape((1, -1))) / mesh.N
         )
 
         Jump = bkd.maxval(js, axis=0)
