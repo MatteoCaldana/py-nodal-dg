@@ -89,3 +89,25 @@ def std(*args, **kwargs):
         return np.std(*args, **kwargs)
     else:
         return bkd.std(*args, correction=0, **kwargs)
+
+
+def reshape_fortran(x, shape):
+    if len(x.shape) > 0:
+        x = x.permute(*reversed(range(len(x.shape))))
+    return x.reshape(*reversed(shape)).permute(*reversed(range(len(shape))))
+
+
+def th_reshape(a, shape, order="C"):
+    if order == "C":
+        return torch.reshape(a, shape)
+    elif order == "F":
+        return reshape_fortran(a, shape)
+    else:
+        raise ValueError(f"Unknown order {order}")
+
+
+RESHAPE = np.array([np.reshape, th_reshape])
+
+
+def reshape(*args, **kwargs):
+    return RESHAPE[BACKEND](*args, **kwargs)

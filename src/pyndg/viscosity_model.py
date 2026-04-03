@@ -32,17 +32,11 @@ def smooth_viscosity(mu, mesh):
     )
 
 
-def reshape_fortran(x, shape):
-    if len(x.shape) > 0:
-        x = x.permute(*reversed(range(len(x.shape))))
-    return x.reshape(*reversed(shape)).permute(*reversed(range(len(shape))))
-
-
 def smooth_viscosity_2d(mu, mesh):
-    assert mu.numel() == np.max(mu.shape)
+    assert len(mu) == np.max(mu.shape)
     mu_avg = (mesh.VToE @ mu.T).reshape((-1,)) / mesh.neighbors
     mu_int = mesh.interp_matrix @ mu_avg[mesh.EToV0T_flat]
-    return reshape_fortran(mu_int, (mesh.Np, mesh.K))
+    return bkd.reshape(mu_int, (mesh.Np, mesh.K), order="F")
 
 
 def bound_and_smooth_viscosity_2d(mu, mesh):
@@ -210,8 +204,8 @@ class EV2D(ViscosityModel2D):
         FYM = F_new_Y.reshape((-1,))[mesh.vmapM_C].reshape(mesh.vmapM.shape)
 
         js = bk.abs(
-            reshape_fortran(FXP - FXM, mesh.nx.shape) * mesh.nx
-            + reshape_fortran(FYP - FYM, mesh.ny.shape) * mesh.ny
+            bkd.reshape(FXP - FXM, mesh.nx.shape, order="F") * mesh.nx
+            + bkd.reshape(FYP - FYM, mesh.ny.shape, order="F") * mesh.ny
         ) / (
             2
             * bk.matmul(bk.ones(((mesh.N + 1) * 3, 1)), mesh.dx2.reshape((1, -1)))
