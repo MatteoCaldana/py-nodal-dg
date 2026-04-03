@@ -75,7 +75,7 @@ TO_CONST = np.array(
     [
         lambda x: x,
         th_to_const,
-        lambda x: x,
+        jnp.array,
     ]
 )
 
