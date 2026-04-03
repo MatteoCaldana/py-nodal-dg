@@ -33,7 +33,7 @@ class Euler2D:
 
             self.mu_vals = bk.zeros_like(self.u[0])
 
-            self.time = bk.zeros((1,))
+            self.time = bkd.to_const(np.array(0))
             if self.params.dt != -1:
                 self.dt = bkd.to_const(np.array(self.params.dt))
             else:
