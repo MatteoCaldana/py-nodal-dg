@@ -941,6 +941,7 @@ class Mesh2D:
                     np.ones((idx,)),
                 )
                 .to(bkd.PREC)
+                .to(bkd.DEVICE)
                 .coalesce()
             )
 
@@ -996,6 +997,7 @@ class Mesh2D:
                     size=self.interp_matrix.shape,
                 )
                 .to(bkd.PREC)
+                .to(bkd.DEVICE)
                 .coalesce()
             )
 
