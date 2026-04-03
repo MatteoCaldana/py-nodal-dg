@@ -152,3 +152,10 @@ RESHAPE = np.array([np.reshape, th_reshape, jnp.reshape])
 
 def reshape(*args, **kwargs):
     return RESHAPE[BACKEND](*args, **kwargs)
+
+
+JIT = np.array([lambda x, **_: x, lambda x, **_: x, jax.jit])
+
+
+def jit(*args, **kwargs):
+    return JIT[BACKEND](*args, **kwargs)

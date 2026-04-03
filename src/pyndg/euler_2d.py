@@ -8,6 +8,78 @@ from .mesh_2d import Mesh2D
 from .bc_2d import BC
 from .viscosity_model import bound_and_smooth_viscosity_2d
 from .time_integrator import LS54
+import functools
+
+
+@functools.partial(bkd.jit, static_argnums=(3, 4))
+def calculate_uPM(u, vmapP_C, vmapM_C, vmapP_shape, vmapM_shape):
+    uflat = u.reshape((-1,))
+    uP = uflat[vmapP_C].reshape(vmapP_shape)
+    uM = uflat[vmapM_C].reshape(vmapM_shape)
+    return uP, uM, (uP + uM) / 2
+
+
+@bkd.jit
+def calculate_bd_flux_comp(uPM2, LIFT, Fscale, nx, ny):
+    return (
+        bk.matmul(LIFT, Fscale * (uPM2 * nx)),
+        bk.matmul(LIFT, Fscale * (uPM2 * ny)),
+    )
+
+
+@bkd.jit
+def calculate_int_flux_comp(u, Drw, Dsw, rx, sx, ry, sy):
+    Drwu, Dswu = bk.matmul(Drw, u), bk.matmul(Dsw, u)
+    return (
+        rx * Drwu + sx * Dswu,
+        ry * Drwu + sy * Dswu,
+    )
+
+
+@functools.partial(bkd.jit, static_argnums=(5,))
+def calculate_gs(qX, qY, mu_vals, vmapP_C, vmapM_C, vmapP_shape):
+    gX, gY = mu_vals * qX, mu_vals * qY
+    gXf, gYf = gX.reshape((-1,)), gY.reshape((-1,))
+
+    gXPM = (gXf[vmapP_C] + gXf[vmapM_C]).reshape(vmapP_shape)
+    gYPM = (gYf[vmapP_C] + gYf[vmapM_C]).reshape(vmapP_shape)
+
+    return gX, gY, gXPM, gYPM
+
+
+@bkd.jit
+def calculate_dGdF(F, G, Drw, Dsw):
+    return (
+        bk.matmul(Drw, F),
+        bk.matmul(Dsw, F),
+        bk.matmul(Drw, G),
+        bk.matmul(Dsw, G),
+    )
+
+
+@bkd.jit
+def calculate_int_flux(dFdr, dFds, dGdr, dGds, gX, gY, Drw, Dsw, rx, sx, ry, sy):
+    return (
+        (rx * dFdr + sx * dFds)
+        + (ry * dGdr + sy * dGds)
+        - (
+            rx * bk.matmul(Drw, gX)
+            + sx * bk.matmul(Dsw, gX)
+            + ry * bk.matmul(Drw, gY)
+            + sy * bk.matmul(Dsw, gY)
+        )
+    )
+
+
+@bkd.jit
+def calculate_bd_flux(fP, fM, gP, gM, uM, uP, gXPM, gYPM, lam, LIFT, Fscale, nx, ny):
+    flux = nx * (fP + fM) + ny * (gP + gM) + lam * (uM - uP) - (gXPM * nx + gYPM * ny)
+    return bk.matmul(LIFT, Fscale * flux / 2)
+
+
+@functools.partial(bkd.jit, static_argnums=(0,))
+def compute_flux(model, u):
+    return model.flux(u)
 
 
 class Euler2D:
@@ -100,121 +172,103 @@ class Euler2D:
         self.iter += 1
         return not self.done
 
-    def _calculate_uPM(self, u):
-        uflat = u.reshape((-1,))
-        uP = uflat[self.mesh.vmapP_C].reshape(self.mesh.vmapP.shape)
-        uM = uflat[self.mesh.vmapM_C].reshape(self.mesh.vmapM.shape)
-        return uP, uM, (uP + uM) / 2
-
-    def _calculate_bd_flux_comp(self, uPM2):
-        return (
-            bk.matmul(self.mesh.LIFT, self.mesh.Fscale * (uPM2 * self.mesh.nx)),
-            bk.matmul(self.mesh.LIFT, self.mesh.Fscale * (uPM2 * self.mesh.ny)),
-        )
-
-    def _calculate_int_flux_comp(self, u):
-        Drwu, Dswu = bk.matmul(self.mesh.Drw, u), bk.matmul(self.mesh.Dsw, u)
-        return (
-            self.mesh.rx * Drwu + self.mesh.sx * Dswu,
-            self.mesh.ry * Drwu + self.mesh.sy * Dswu,
-        )
-
-    def _calculate_gs(self, qX, qY):
-        gX, gY = self.mu_vals * qX, self.mu_vals * qY
-        gXf, gYf = gX.reshape((-1,)), gY.reshape((-1,))
-        gXPM = gXf[self.mesh.vmapP_C] + gXf[self.mesh.vmapM_C]
-        gXPM = gXPM.reshape(self.mesh.vmapP.shape)
-        gYPM = gYf[self.mesh.vmapP_C] + gYf[self.mesh.vmapM_C]
-        gYPM = gYPM.reshape(self.mesh.vmapP.shape)
-        return gX, gY, gXPM, gYPM
-
-    def _calculate_dGdF(self, F, G):
-        dFdr = bk.matmul(self.mesh.Drw, F)
-        dFds = bk.matmul(self.mesh.Dsw, F)
-        dGdr = bk.matmul(self.mesh.Drw, G)
-        dGds = bk.matmul(self.mesh.Dsw, G)
-        return dFdr, dFds, dGdr, dGds
-
-    def _calculate_int_flux(self, dFdr, dFds, dGdr, dGds, gX, gY):
-        return (
-            (self.mesh.rx * dFdr + self.mesh.sx * dFds)
-            + (self.mesh.ry * dGdr + self.mesh.sy * dGds)
-            - (
-                self.mesh.rx * bk.matmul(self.mesh.Drw, gX)
-                + self.mesh.sx * bk.matmul(self.mesh.Dsw, gX)
-                + self.mesh.ry * bk.matmul(self.mesh.Drw, gY)
-                + self.mesh.sy * bk.matmul(self.mesh.Dsw, gY)
-            )
-        )
-
-    def _calculate_bd_flux(self, fP, fM, gP, gM, uM, uP, gXPM, gYPM, lam):
-        flux = (
-            self.mesh.nx * (fP + fM)
-            + self.mesh.ny * (gP + gM)
-            + lam * (uM - uP)
-            - (gXPM * self.mesh.nx + gYPM * self.mesh.ny)
-        )
-        return bk.matmul(self.mesh.LIFT, self.mesh.Fscale * flux / 2)
-
     def _rhs_weak(self, u):
         # TODO: implement non periodic BC
 
         # Solution traces
-        uPuMuPM2 = [self._calculate_uPM(u[i]) for i in range(4)]
+        uPuMuPM2 = [
+            calculate_uPM(
+                u[i],
+                self.mesh.vmapP_C,
+                self.mesh.vmapM_C,
+                self.mesh.vmapP.shape,
+                self.mesh.vmapM.shape,
+            )
+            for i in range(4)
+        ]
         # Compute numerical fluxes of auxiliary equation
-        bd_flux = [self._calculate_bd_flux_comp(uPuMuPM2[i][2]) for i in range(4)]
+        bd_flux = [
+            calculate_bd_flux_comp(
+                uPuMuPM2[i][2],
+                self.mesh.LIFT,
+                self.mesh.Fscale,
+                self.mesh.nx,
+                self.mesh.ny,
+            )
+            for i in range(4)
+        ]
         # Compute internal fluxes for auxiliary variable
-        int_flux_c = [self._calculate_int_flux_comp(u[i]) for i in range(4)]
+        int_flux_c = [
+            calculate_int_flux_comp(
+                u[i],
+                self.mesh.Drw,
+                self.mesh.Dsw,
+                self.mesh.rx,
+                self.mesh.sx,
+                self.mesh.ry,
+                self.mesh.sy,
+            )
+            for i in range(4)
+        ]
         # Compute auxiliary variables with viscosity and variable traces
         q = [[bd_flux[i][j] - int_flux_c[i][j] for j in range(2)] for i in range(4)]
-        gXgYgXPMgYPM = [self._calculate_gs(*q[i]) for i in range(4)]
+        gXgYgXPMgYPM = [
+            calculate_gs(
+                q[i][0],
+                q[i][1],
+                self.mu_vals,
+                self.mesh.vmapP_C,
+                self.mesh.vmapM_C,
+                self.mesh.vmapP.shape,
+            )
+            for i in range(4)
+        ]
         # Compute volume contributions
-        _, _, _, _, Fu, Gu = self.params.model.flux(u)
+        _, _, _, _, Fu, Gu = compute_flux(self.params.model, u)
         # Compute weak derivatives
-        dFdrdFdsdGdrdGds = [self._calculate_dGdF(Fu[i], Gu[i]) for i in range(4)]
+        dFdrdFdsdGdrdGds = [
+            calculate_dGdF(Fu[i], Gu[i], self.mesh.Drw, self.mesh.Dsw) for i in range(4)
+        ]
         int_flux = [
-            self._calculate_int_flux(*dFdrdFdsdGdrdGds[i], *gXgYgXPMgYPM[i][:2])
+            calculate_int_flux(
+                *dFdrdFdsdGdrdGds[i],
+                *gXgYgXPMgYPM[i][:2],
+                self.mesh.Drw,
+                self.mesh.Dsw,
+                self.mesh.rx,
+                self.mesh.sx,
+                self.mesh.ry,
+                self.mesh.sy,
+            )
             for i in range(4)
         ]
         # Evaluate primitive variables & flux functions
-        rhoP, vuP, vvP, pP, FuP, GuP = self.params.model.flux(
-            [uPuMuPM2[i][0] for i in range(4)]
+        rhoP, vuP, vvP, pP, FuP, GuP = compute_flux(
+            self.params.model, [uPuMuPM2[i][0] for i in range(4)]
         )
-        rhoM, vuM, vvM, pM, FuM, GuM = self.params.model.flux(
-            [uPuMuPM2[i][1] for i in range(4)]
+        rhoM, vuM, vvM, pM, FuM, GuM = compute_flux(
+            self.params.model, [uPuMuPM2[i][1] for i in range(4)]
         )
         # Compute maximum wave speed on edges
+        lam = bk.maximum(
+            bk.sqrt(vuM * vuM + vvM * vvM)
+            + bk.sqrt(bk.abs(self.params.gas_gamma * pM / rhoM)),
+            bk.sqrt(vuP * vuP + vvP * vvP)
+            + bk.sqrt(bk.abs(self.params.gas_gamma * pP / rhoP)),
+        )
 
-        # !!! WARNING
-        # computations are cut short due to automatic differentiation
-        # problems in this part
-        COMPUTE_CORRECT_WAVE_SPEED = False
-        if COMPUTE_CORRECT_WAVE_SPEED:
-            lam = bk.maximum(
-                bk.sqrt(vuM * vuM + vvM * vvM)
-                + bk.sqrt(bk.abs(self.params.gas_gamma * pM / rhoM)),
-                bk.sqrt(vuP * vuP + vvP * vvP)
-                + bk.sqrt(bk.abs(self.params.gas_gamma * pP / rhoP)),
+        max_lam_edges = []
+        for i in range(lam.shape[0] // self.mesh.Nfp):
+            max_lam_edge = bkd.maxval(
+                lam[i * self.mesh.Nfp : (i + 1) * self.mesh.Nfp, :],
+                axis=0,
             )
+            for _ in range(self.mesh.Nfp):
+                max_lam_edges.append(max_lam_edge)
+        lam = bk.vstack(max_lam_edges)
 
-            max_lam_edges = []
-            for i in range(lam.shape[0] // self.mesh.Nfp):
-                max_lam_edge = bkd.maxval(
-                    lam[i * self.mesh.Nfp : (i + 1) * self.mesh.Nfp, :],
-                    axis=0,
-                )
-                for _ in range(self.mesh.Nfp):
-                    max_lam_edges.append(max_lam_edge)
-            lam = bk.vstack(max_lam_edges)
-
-        else:
-            INFTY = 8
-            lambda_M = bk.sqrt(self.params.gas_gamma * pM / rhoM) + 0.3757
-            lambda_P = bk.sqrt(self.params.gas_gamma * pP / rhoP) + 0.3757
-            lam = (lambda_M**INFTY + lambda_P**INFTY) ** (1 / INFTY)
-        ###
         bd_flux = [
-            self._calculate_bd_flux(
+            calculate_bd_flux(
                 FuP[i],
                 FuM[i],
                 GuP[i],
@@ -224,6 +278,10 @@ class Euler2D:
                 gXgYgXPMgYPM[i][2],
                 gXgYgXPMgYPM[i][3],
                 lam,
+                self.mesh.LIFT,
+                self.mesh.Fscale,
+                self.mesh.nx,
+                self.mesh.ny,
             )
             for i in range(4)
         ]
