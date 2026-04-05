@@ -29,6 +29,7 @@ if BACKEND == NUMPY:
     import numpy as bkd
 if BACKEND == TORCH:
     import torch as bkd
+
     if torch.cuda.is_available():
         DEVICE = "cuda"
     else:

@@ -16,6 +16,7 @@ import statistics
 
 PROFILER = defaultdict(list)
 
+
 @functools.partial(bkd.jit, static_argnums=(3, 4))
 def calculate_uPM(u, vmapP_C, vmapM_C, vmapP_shape, vmapM_shape):
     uflat = u.reshape((-1,))

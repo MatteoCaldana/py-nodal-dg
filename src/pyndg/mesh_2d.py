@@ -160,6 +160,91 @@ def make_gmsh(corner_sw, corner_ne, nps):
     return VXY, K, Nv, EToV, b_faces, PerBToB, PerBFToF
 
 
+def _compute_bfaces_from_bctag(BCTag, EToV):
+    BFaces = {}
+    face_to_v = np.array([[0, 1], [1, 2], [0, 2]])
+    unique_tags = np.unique(BCTag)
+    unique_tags = unique_tags[unique_tags != 0]
+    for tag in unique_tags:
+        elements, local_faces = np.where(BCTag == tag)
+        v_indices = face_to_v[local_faces]
+        BFaces[BC(int(tag))] = EToV[elements[:, None], v_indices]
+    return BFaces
+
+
+TMP = None
+
+
+def mesh_reader_gambit_bc_2d(file_name):
+    """
+    Reads Gambit *.neu mesh files and extracts BC tags.
+    Assumes triangular elements (3 nodes per element).
+    """
+    NEU_BC_MAP = {
+        "In": BC.In,
+        "Out": BC.Out,
+        "Wall": BC.Wall,
+        "Far": BC.Far,
+        "Cyl": BC.Cyl,
+        "Dirichlet": BC.Dirichlet,
+        "Neuman": BC.Neuman,
+        "Slip": BC.Slip,
+    }
+
+    with open(file_name, "r") as fid:
+        lines = fid.readlines()
+
+    # 1. Parse Dimensions (Node count and Element count)
+    # Typically found on line 7 (index 6)
+    dims = np.fromstring(lines[6], sep=" ", dtype=int)
+    Nv, K = dims[0], dims[1]
+
+    # 2. Read Node Coordinates
+    VXY = np.zeros((Nv, 2))
+    for i in range(Nv):
+        # Coordinates start after the header (line 10 / index 9)
+        data = np.fromstring(lines[9 + i], sep=" ")
+        VXY[i] = data[1], data[2]
+
+    # 3. Read Element Connectivity
+    # Locate the start of the ELEMENTS/CELLS section
+    start_line = 9 + Nv + 2
+    EToV = np.zeros((K, 3), dtype=int)
+    for k in range(K):
+        data = np.fromstring(lines[start_line + k], sep=" ", dtype=int)
+        # data[3:6] contains the 3 vertex IDs
+        # Adjust 1-based Gambit indexing to 0-based Python indexing
+        EToV[k, :] = data[3:6] - 1
+
+    # Fill Boundary Condition array
+    bc_type = np.zeros((K, 3), dtype=int)
+    for idx, line in enumerate(lines):
+        bc_flag = 0
+
+        for key, flag in NEU_BC_MAP.items():
+            if key in line:
+                bc_flag = flag
+                break
+
+        if bc_flag != 0:
+            # Skip the header lines of the BC section
+            curr = idx + 1
+            while "ENDOFSECTION" not in lines[curr]:
+                tmp_id = np.fromstring(lines[curr], sep=" ", dtype=int)
+
+                # tmp_id[0]: Element ID (1-based)
+                # tmp_id[2]: Local Face ID (1-based)
+                elem_idx = tmp_id[0] - 1
+                face_idx = tmp_id[2] - 1
+
+                bc_type[elem_idx, face_idx] = bc_flag
+                curr += 1
+
+    global TMP
+    TMP = bc_type
+    return VXY, K, Nv, EToV, _compute_bfaces_from_bctag(bc_type, EToV), None, None
+
+
 ALPHA_OPT = [
     0.0000,
     0.0000,
@@ -303,11 +388,12 @@ def solve2x2(A, b):
 
 def mapFtoCflat(vmap):
     # map Fortran (0-based) flattening to C flattening for x
-    mapFtoC = np.arange(np.max(vmap) + 1).reshape((-1, vmap.shape[1])).flatten(order="F")
+    vmap_max = np.max(vmap) + 1
+    mapFtoC = np.arange(vmap_max).reshape((-1, vmap.shape[1])).flatten(order="F")
     # map C flattening to Fortran flattening for VtoE
     mapCtoF = np.arange(vmap.size).reshape(vmap.shape, order="F").flatten()
     # VtoE with 0-based indexing and C flattening order
-    return mapFtoC[vmap.flatten(order="F")][mapCtoF].astype(np.int64)
+    return mapFtoC[vmap.flatten(order="F")][mapCtoF].astype(np.int32)
 
 
 _TO_CONSTANTS_2D = [
@@ -335,12 +421,14 @@ _TO_CONSTANTS_2D = [
     "neighbors",
     "min_hK",
     "M",
-    "EToVT_flat",
+    "EToV_flat",
     "invV",
 ]
 
 
 class Mesh2D:
+    Reader = {"msh": read_gmsh_file, "neu": mesh_reader_gambit_bc_2d}
+
     def __init__(self, params):
         assert isinstance(params, ScalarParam2D) or isinstance(params, EulerParam2D)
         self.params = params
@@ -352,12 +440,13 @@ class Mesh2D:
             return
         params = self.params
         self.has_periodic_bc = params.has_periodic_bc
-        self.bc = params.bc
+        self.bc = params.bc if params.bc != {} else {k: k for k in range(1, len(BC))}
         self.N = params.N
         self.N2 = np.array(self.N**2, dtype=np.float64)
         self.Nfp = self.N + 1
         self.Np = (self.N + 1) * (self.N + 2) // 2
         if isinstance(params.mesh_file, str):
+            reader = Mesh2D.Reader[params.mesh_file.split(".")[-1]]
             (
                 self.VXY,
                 self.K,
@@ -366,7 +455,7 @@ class Mesh2D:
                 self.BFaces,
                 self.PerBToB_map,
                 self.PerBFToF_map,
-            ) = read_gmsh_file(params.mesh_file)
+            ) = reader(params.mesh_file)
         else:
             print("Building mesh without gmsh")
             (
@@ -378,8 +467,10 @@ class Mesh2D:
                 self.PerBToB_map,
                 self.PerBFToF_map,
             ) = make_gmsh(*params.mesh_file)
-            ca, cb, nn = params.mesh_file
-            self.min_hK = np.array((cb[0] - ca[0]) / nn[0], dtype=np.float64)
+
+        assert set(self.BFaces.keys()) <= set(self.bc.keys())
+        assert all([isinstance(k, int | BC) for k in self.bc.keys()])
+        assert all([k != 0 for k in self.bc.keys()]), "BC Tag 0 is reserved"
 
         print("Pre-computing geometric quantities")
         self.VX, self.VY = self.VXY[:, 0], self.VXY[:, 1]
@@ -403,7 +494,7 @@ class Mesh2D:
         self.__compute_radius_incircle()
         print("Pre-computing geometric quantities: connectivity")
         self.__compute_connectivity_matrix()
-        print("Pre-computing geometric quantities: coundary conditions")
+        print("Pre-computing geometric quantities: boundary conditions")
         self.__compute_bc_tags()
         print("Pre-computing geometric quantities: ghost elements")
         self.__compute_ghost_elements_essential()
@@ -429,12 +520,12 @@ class Mesh2D:
         self.__compute_slices()
         print("Pre-computing geometric quantities: meshgrid interp")
         self.__compute_meshgrid_interp_matrix()
-
+        print("Pre-compute minimal edge length:", end=" ")
+        self.min_hK = self._get_minimal_face_length()
+        print(f"{self.min_hK:.2e}")
         print("Transform to constant")
         for field in _TO_CONSTANTS_2D:
-            print("field", field)
             self.__dict__[field] = bkd.to_const(self.__dict__[field])
-        print("done")
         self.is_init = True
 
     def __compute_slices(self):
@@ -481,6 +572,12 @@ class Mesh2D:
                 ),
             )
         )
+
+    def _get_minimal_face_length(self):
+        fnx = np.vstack([self.yv2 - self.yv1, self.yv3 - self.yv2, self.yv1 - self.yv3])
+        fny = np.vstack([self.xv1 - self.xv2, self.xv2 - self.xv3, self.xv3 - self.xv1])
+        fL = np.sqrt(fnx**2 + fny**2)
+        return np.min(fL)
 
     def __compute_nodes(self):
         self.xrs, self.yrs = nodes_2d(self.N)
@@ -604,10 +701,11 @@ class Mesh2D:
         elem_listB, _ = np.where(self.EToV == f[1])
         elem = list(set(elem_listA) & set(elem_listB))
         assert len(elem) == 1
-        _, lind = np.where(self.EToV[elem, :] == f[0])
+        elem = elem[0]
+        lind = np.where(self.EToV[elem, :] == f[0])[0]
         return (
             elem,
-            lind if (self.EToV[elem, lind % 3] == f[1]).all() else lind % 3,
+            lind if (self.EToV[elem, (lind + 1) % 3] == f[1]).all() else (lind + 2) % 3,
         )
 
     def __compute_connectivity_matrix(self):
@@ -661,23 +759,24 @@ class Mesh2D:
                         else:
                             self.PShift[key] = e
 
-                    insert(elem1[0], [elem2, x2 - x1, y2 - y1])
-                    insert(elem2[0], [elem1, x1 - x2, y1 - y2])
+                    insert(elem1, [[elem2], x2 - x1, y2 - y1])
+                    insert(elem2, [[elem1], x1 - x2, y1 - y2])
 
         self.PShift = {
             k: np.concatenate(self.PShift[k]).reshape((-1, 3)) for k in self.PShift
         }
 
     def __compute_bc_tags(self):
-        self.BCTag = np.zeros_like(self.EToV)
-        for key in self.BFaces:
-            if self.bc[key] != BC.Periodic:
+        self.BCTag = np.zeros_like(self.EToV, dtype=np.int32)
+        for bc_tag in self.BFaces:
+            bc_id = self.bc[bc_tag]
+            if bc_id != BC.Periodic:
                 bc_ind = np.zeros_like(self.EToV, dtype=bool)
-                face_list = self.BFaces[key]
+                face_list = self.BFaces[bc_tag]
                 for j in range(face_list.shape[0]):
                     el, lf = self.__lfind(face_list[j, :])
                     bc_ind[el, lf] = True
-                self.BCTag += int(self.bc[key]) * bc_ind
+                self.BCTag += bc_tag * bc_ind
 
     def __compute_ghost_elements(self):
         self.__compute_ghost_elements1()
@@ -703,12 +802,10 @@ class Mesh2D:
             / 2
         )
 
-        vind = np.array([2, 0, 1])
+        V_IND = np.array([2, 0, 1])
         xyvns = [np.empty((self.K,)) for _ in range(6)]
         for i in range(self.K):
-            vns = [
-                self.EToV[self.EToE[i, j], vind[self.EToF[i, j]]] for j in range(3)
-            ]
+            vns = [self.EToV[self.EToE[i, j], V_IND[self.EToF[i, j]]] for j in range(3)]
             for j in range(3):
                 for k in range(2):
                     xyvns[2 * j + k][i] = self.VXY[vns[j], k]
@@ -722,7 +819,7 @@ class Mesh2D:
         ids = [np.where(self.BCTag[:, j])[0] for j in range(3)]
         A0 = 2 * np.matmul(self.AVG2D, self.J)
         for j in range(3):
-            H = 2 * A0[ids[j]] / self.fL[0, ids[j]]
+            H = 2 * A0[ids[j]] / self.fL[j, ids[j]]
             xyvns[2 * j][ids[j]] += 2 * self.fnx[j, ids[j]] * H / self.fL[j, ids[j]]
             xyvns[2 * j + 1][ids[j]] += 2 * self.fny[j, ids[j]] * H / self.fL[j, ids[j]]
         self.xvn1, self.yvn1, self.xvn2, self.yvn2, self.xvn3, self.yvn3 = xyvns
@@ -732,18 +829,18 @@ class Mesh2D:
         self.xG = np.empty((self.Np, self.KG))
         self.yG = np.empty((self.Np, self.KG))
         ranges = [0, ids[0].size, ids[0].size + ids[1].size, self.KG]
-        perm = np.array([1, 2, 0])
+        PERM = np.array([1, 2, 0])
         for j in range(3):
-            self.EToGE[ids[j], 0] = np.arange(ranges[j], ranges[j + 1])
+            self.EToGE[ids[j], j] = np.arange(ranges[j], ranges[j + 1])
             self.xG[:, ranges[j] : ranges[j + 1]] = 0.5 * (
                 -np.outer(self.rs, xyvs[2 * j][ids[j]])
                 + np.outer(self.r1, xyvns[2 * j][ids[j]])
-                + np.outer(self.s1, xyvs[2 * perm[j]][ids[j]])
+                + np.outer(self.s1, xyvs[2 * PERM[j]][ids[j]])
             )
             self.yG[:, ranges[j] : ranges[j + 1]] = 0.5 * (
                 -np.outer(self.rs, xyvs[2 * j + 1][ids[j]])
                 + np.outer(self.r1, xyvns[2 * j + 1][ids[j]])
-                + np.outer(self.s1, xyvs[2 * perm[j] + 1][ids[j]])
+                + np.outer(self.s1, xyvs[2 * PERM[j] + 1][ids[j]])
             )
 
     def __compute_ghost_elements1(self):
@@ -805,7 +902,7 @@ class Mesh2D:
                 self.patch_alphasB[j, :, i] = b
 
     def __compute_ghost_elements3(self):
-        self.MMAP = np.empty((self.Np, 3))
+        self.MMAP = np.empty((self.Np, 3), dtype=np.int32)
         xx, yy = np.array([-1, 1, -1]), np.array([-1, -1, 1])
         vindm = np.array([[0, 2, 1], [1, 0, 2], [2, 1, 0]])
         xo = 0.5 * (-self.rs * xx[0] + self.r1 * xx[1] + self.s1 * xx[2])
@@ -838,14 +935,14 @@ class Mesh2D:
         )
         self.vmapM = np.empty((self.Nfp, 3, self.K), dtype=np.int32)
         self.vmapP = np.empty((self.Nfp, 3, self.K), dtype=np.int32)
-        self.mapM = np.arange(self.K * self.Nfp * 3)
-        self.mapP = np.arange(self.K * self.Nfp * 3).reshape(
+        self.mapM = np.arange(self.K * self.Nfp * 3, dtype=np.int32)
+        self.mapP = np.arange(self.K * self.Nfp * 3, dtype=np.int32).reshape(
             (self.Nfp, 3, self.K), order="F"
         )
-        self.mapB = np.arange(self.KG * self.Nfp).reshape(
+        self.mapB = np.arange(self.KG * self.Nfp, dtype=np.int32).reshape(
             (self.Nfp, self.KG), order="F"
         )
-        self.vmapB = np.empty((self.Nfp, self.KG))
+        self.vmapB = np.empty((self.Nfp, self.KG), dtype=np.int32)
 
     def __compute_face_maps2(self):
         for k1 in range(self.K):
@@ -855,13 +952,15 @@ class Mesh2D:
     def __compute_face_maps3(self):
         flat_x = self.x.reshape((-1,), order="F")
         flat_y = self.y.reshape((-1,), order="F")
+        flat_xG = self.xG.reshape((-1,), order="F")
+        flat_yG = self.yG.reshape((-1,), order="F")
         for k1 in range(self.K):
             for f1 in range(3):
                 k2, f2 = self.EToE[k1, f1], self.EToF[k1, f1]
                 v1, v2 = self.EToV[k1, f1], self.EToV[k1, (f1 + 1) % 3]
-                refd = np.sqrt(
-                    (self.VX[v1] - self.VX[v2]) ** 2 + (self.VY[v1] - self.VY[v2]) ** 2
-                )
+                dx = self.VX[v1] - self.VX[v2]
+                dy = self.VY[v1] - self.VY[v2]
+                refd = np.sqrt(dx * dx + dy * dy)
 
                 xs, ys = 0, 0
                 if k1 in self.PShift and self.has_periodic_bc:
@@ -881,12 +980,25 @@ class Mesh2D:
 
                 if k2 == k1:
                     kg2 = self.EToGE[k1, f1]
-                    vidP = self.gnodeids[self.Fmask[:, 3], kg2]
-                    x2, y2 = (self.xG[vidP] - xs), (self.yG[vidP] - ys)
+                    vidP = self.gnodeids[self.Fmask[:, 2], kg2]
+                    x2, y2 = (flat_xG[vidP] - xs), (flat_yG[vidP] - ys)
                     D = np.subtract.outer(x1, x2) ** 2 + np.subtract.outer(y1, y2) ** 2
                     idM, idP = np.where(np.sqrt(np.abs(D)) < MESH_TOL * refd)
+                    assert idM.size == self.Nfp, f"{idM.size} != {self.Nfp}"
                     self.vmapB[idP, kg2] = vidM[idM]
                     self.mapB[idP, kg2] = idM + f1 * self.Nfp + k1 * 3 * self.Nfp
+
+        if not self.has_periodic_bc:
+            mapB = np.where(
+                self.vmapP.reshape((-1,), order="F")
+                == self.vmapM.reshape((-1,), order="F")
+            )[0]
+            print(np.all(np.sort(mapB) == np.sort(self.mapB.flatten())))
+            vmapB = self.vmapM.flatten(order="F")[mapB]
+            print(np.all(np.sort(vmapB) == np.sort(self.vmapB.flatten())))
+            # TODO: BUG: same elements but different order, why?
+            assert np.all(mapB == self.mapB.reshape((-1,), order="F"))
+            assert np.all(vmapB == self.vmapB.flatten(order="F"))
 
     def __compute_face_maps4(self):
         self.vmapP = self.vmapP.reshape((-1), order="F")
@@ -908,9 +1020,9 @@ class Mesh2D:
     def __compute_interpolation_matrix1(self):
         ij, idx = np.ones((self.VX.size * 6, 2), dtype=np.int32), 0
 
-        self.EToVT_flat = self.EToV.T.reshape((-1,), order="F")
+        self.EToV_flat = self.EToV.ravel()
         for i in range(self.VX.size):
-            js = np.where(self.EToVT_flat == i)[0] // 3
+            js = np.where(self.EToV_flat == i)[0] // 3
             k = js.size
             ij[idx : idx + k, 0] *= i
             ij[idx : idx + k, 1] = js
@@ -941,9 +1053,9 @@ class Mesh2D:
     def __compute_interpolation_matrix2(self):
         coov = np.stack(
             [
-                self.VX[self.EToVT_flat],
-                self.VY[self.EToVT_flat],
-                np.ones_like(self.EToVT_flat),
+                self.VX[self.EToV_flat],
+                self.VY[self.EToV_flat],
+                np.ones_like(self.EToV_flat),
             ],
             axis=1,
         )
@@ -972,13 +1084,12 @@ class Mesh2D:
         self.coov_dof = sparse.coo_matrix((coov.reshape((-1,), order="F"), (i, j)))
 
         self.interp_matrix = (self.coov_dof @ self.coov_inv).tocoo()
+        indices = np.stack([self.interp_matrix.row, self.interp_matrix.col], axis=1)
 
         if bkd.BACKEND == bkd.TORCH:
             self.interp_matrix = (
                 bk.sparse_coo_tensor(
-                    indices=bk.tensor(
-                        [self.interp_matrix.row, self.interp_matrix.col], dtype=bk.int64
-                    ),
+                    indices=indices.T,
                     values=self.interp_matrix.data,
                     size=self.interp_matrix.shape,
                 )
@@ -989,7 +1100,7 @@ class Mesh2D:
 
         if bkd.BACKEND == bkd.JAX:
             data = self.interp_matrix.data
-            indices = np.stack([self.interp_matrix.row, self.interp_matrix.col], axis=1)
+
             from jax.experimental import sparse as jsparse
 
             self.interp_matrix = jsparse.BCOO(
@@ -1006,16 +1117,78 @@ class Mesh2D:
         self.vmapBC_list = {}
 
         if len(self.bc_essential):
-            ind = np.where(self.BCTag.reshape((-1,), order="F") != 0)[0]
-            bct = np.zeros((self.KG,))
+            ind = np.where(self.BCTag != 0)
+            bct = np.zeros((self.KG,), dtype=np.int32)
             assert np.all(self.EToGE[ind] >= 0)
             bct[self.EToGE[ind]] = self.BCTag[ind]
-            bnodes = np.outer(np.ones((self.Nfp,)), bct.reshape((-1,), order="F"))
-            bnodes = bnodes.reshape((-1,), order="F")
+            bnodes = np.outer(np.ones((self.Nfp,), dtype=np.int32), bct)
+            for bc_tag in self.bc_essential:
+                bc_ind = bnodes == bc_tag
+                self.GEBC_list[bc_tag] = np.where(bct == bc_tag)[0]
+                self.mapBC_list[bc_tag] = self.mapB[bc_ind].reshape((self.Nfp, -1))
+                self.vmapBC_list[bc_tag] = self.vmapB[bc_ind].reshape((self.Nfp, -1))
 
-            for key in self.bc_essential:
-                tag = int(self.bc_essential[key])
-                bc_ind = np.where(bnodes == tag)[0]
-                self.GEBC_list[tag] = np.where(bct == tag)[0]
-                self.mapBC_list[tag] = self.mapB[bc_ind]
-                self.vmapBC_list[tag] = self.vmapB[bc_ind]
+    def plot(self, show_face_id=True, show_vtx_id=True):
+        """
+        Plots the 2D triangular mesh and highlights boundary edges
+        with different colors based on their BC tags.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import LineCollection
+        import matplotlib.colors as mcolors
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        # --- 1. Plot the Full Mesh (Internal Edges) ---
+        # We extract all triangle edges from EToV
+        all_edges = []
+        for tri in self.EToV:
+            # tri contains indices of the 3 vertices
+            pts = self.VXY[tri]
+            all_edges.append((pts[0], pts[1]))
+            all_edges.append((pts[1], pts[2]))
+            all_edges.append((pts[2], pts[0]))
+
+        # Plot mesh in light gray to make BCs stand out
+        mesh_lc = LineCollection(
+            all_edges, colors="lightgray", linewidths=0.5, alpha=0.5
+        )
+        ax.add_collection(mesh_lc)
+
+        # Plot Boundary Edges by Tag
+        color_cycle = list(mcolors.TABLEAU_COLORS.values())
+        for i, (tag, faces) in enumerate(self.BFaces.items()):
+            bc_edges = []
+            for node_pair in faces:
+                p1 = self.VXY[node_pair[0]]
+                p2 = self.VXY[node_pair[1]]
+                bc_edges.append((p1, p2))
+
+            color = color_cycle[i % len(color_cycle)]
+            bc_lc = LineCollection(
+                bc_edges,
+                colors=color,
+                linewidths=2.5,
+                label=f"Tag ID={tag}, type={BC(self.bc[tag]).name}",
+            )
+            ax.add_collection(bc_lc)
+
+        if show_face_id:
+            for eid, tri in enumerate(self.EToV):
+                pts = self.VXY[tri].mean(axis=0)
+                plt.text(pts[0], pts[1], f"{eid}")
+
+        if show_vtx_id:
+            for i in range(self.VXY.shape[0]):
+                plt.text(self.VXY[i, 0], self.VXY[i, 1], f"{i}", color="r")
+
+        plt.scatter(self.xG.flatten(), self.yG.flatten(), marker="x")
+
+        ax.set_aspect("equal")
+        ax.autoscale()
+        plt.title(f"2D Mesh: K={self.K}, N={self.N}")
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.legend(loc="upper right", bbox_to_anchor=(1.25, 1))
+        plt.tight_layout()
+        plt.show()
