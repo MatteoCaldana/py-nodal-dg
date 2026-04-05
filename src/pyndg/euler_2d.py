@@ -14,6 +14,7 @@ import time
 from collections import defaultdict
 import statistics
 
+PROFILER = defaultdict(list)
 
 @functools.partial(bkd.jit, static_argnums=(3, 4))
 def calculate_uPM(u, vmapP_C, vmapM_C, vmapP_shape, vmapM_shape):
@@ -86,114 +87,144 @@ def compute_flux(model, u):
     return model.flux(u)
 
 
-def rhs_kernel(u, mu_vals, mesh_data, model, gas_gamma):
-    # 1. Solution traces
+def rhs_kernel(u, mu_vals, mesh, model, gas_gamma):
+    # TODO: implement non periodic BC
+    global PROFILER
+
+    # Solution traces
+    t0 = time.time()
     uPuMuPM2 = [
         calculate_uPM(
             u[i],
-            mesh_data['vmapP_C'],
-            mesh_data['vmapM_C'],
-            mesh_data['vmapP_shape'],
-            mesh_data['vmapM_shape'],
+            mesh.vmapP_C,
+            mesh.vmapM_C,
+            mesh.vmapP.shape,
+            mesh.vmapM.shape,
         )
         for i in range(4)
     ]
+    PROFILER["solution_traces"].append(time.time() - t0)
 
-    # 2. Auxiliary boundary flux
+    # Compute numerical fluxes of auxiliary equation
+    t0 = time.time()
     bd_flux_aux = [
         calculate_bd_flux_comp(
             uPuMuPM2[i][2],
-            mesh_data['LIFT'],
-            mesh_data['Fscale'],
-            mesh_data['nx'],
-            mesh_data['ny'],
+            mesh.LIFT,
+            mesh.Fscale,
+            mesh.nx,
+            mesh.ny,
         )
         for i in range(4)
     ]
+    PROFILER["aux_bd_flux"].append(time.time() - t0)
 
-    # 3. Internal fluxes for auxiliary variable
+    # Compute internal fluxes for auxiliary variable
+    t0 = time.time()
     int_flux_c = [
         calculate_int_flux_comp(
             u[i],
-            mesh_data['Drw'],
-            mesh_data['Dsw'],
-            mesh_data['rx'],
-            mesh_data['sx'],
-            mesh_data['ry'],
-            mesh_data['sy'],
+            mesh.Drw,
+            mesh.Dsw,
+            mesh.rx,
+            mesh.sx,
+            mesh.ry,
+            mesh.sy,
         )
         for i in range(4)
     ]
+    PROFILER["aux_int_flux"].append(time.time() - t0)
 
-    # 4. Auxiliary variables
+    # Compute auxiliary variables with viscosity and variable traces
+    t0 = time.time()
     q = [[bd_flux_aux[i][j] - int_flux_c[i][j] for j in range(2)] for i in range(4)]
     gXgYgXPMgYPM = [
         calculate_gs(
             q[i][0],
             q[i][1],
             mu_vals,
-            mesh_data['vmapP_C'],
-            mesh_data['vmapM_C'],
-            mesh_data['vmapP_shape'],
+            mesh.vmapP_C,
+            mesh.vmapM_C,
+            mesh.vmapP.shape,
         )
         for i in range(4)
     ]
+    PROFILER["aux_vars_gs"].append(time.time() - t0)
 
-    # 5. Volume contributions
+    # Compute volume contributions
+    t0 = time.time()
     _, _, _, _, Fu, Gu = compute_flux(model, u)
+    PROFILER["volume_flux"].append(time.time() - t0)
 
-    # 6. Weak derivatives
+    # Compute weak derivatives
+    t0 = time.time()
     dFdrdFdsdGdrdGds = [
-        calculate_dGdF(Fu[i], Gu[i], mesh_data['Drw'], mesh_data['Dsw']) for i in range(4)
+        calculate_dGdF(Fu[i], Gu[i], mesh.Drw, mesh.Dsw) for i in range(4)
     ]
     int_flux = [
         calculate_int_flux(
             *dFdrdFdsdGdrdGds[i],
             *gXgYgXPMgYPM[i][:2],
-            mesh_data['Drw'],
-            mesh_data['Dsw'],
-            mesh_data['rx'],
-            mesh_data['sx'],
-            mesh_data['ry'],
-            mesh_data['sy'],
+            mesh.Drw,
+            mesh.Dsw,
+            mesh.rx,
+            mesh.sx,
+            mesh.ry,
+            mesh.sy,
         )
         for i in range(4)
     ]
+    PROFILER["weak_derivatives"].append(time.time() - t0)
 
-    # 7. Trace flux
-    uP_list = [uPuMuPM2[i][0] for i in range(4)]
-    uM_list = [uPuMuPM2[i][1] for i in range(4)]
-    rhoP, vuP, vvP, pP, FuP, GuP = compute_flux(model, uP_list)
-    rhoM, vuM, vvM, pM, FuM, GuM = compute_flux(model, uM_list)
+    # Evaluate primitive variables & flux functions
+    t0 = time.time()
+    rhoP, vuP, vvP, pP, FuP, GuP = compute_flux(
+        model, [uPuMuPM2[i][0] for i in range(4)]
+    )
+    rhoM, vuM, vvM, pM, FuM, GuM = compute_flux(
+        model, [uPuMuPM2[i][1] for i in range(4)]
+    )
+    PROFILER["trace_flux"].append(time.time() - t0)
 
-    # 8. Wave speed (Small adjustment for JIT: using reshape instead of a Python loop)
+    # Compute maximum wave speed on edges
+    t0 = time.time()
     lam = bk.maximum(
         bk.sqrt(vuM * vuM + vvM * vvM) + bk.sqrt(bk.abs(gas_gamma * pM / rhoM)),
         bk.sqrt(vuP * vuP + vvP * vvP) + bk.sqrt(bk.abs(gas_gamma * pP / rhoP)),
     )
-    
+
     max_lam_edges = []
-    for i in range(lam.shape[0] // mesh_data['Nfp']):
-        max_lam_edge = bkd.maxval(
-            lam[i * mesh_data['Nfp'] : (i + 1) * mesh_data['Nfp'], :], axis=0
-        )
-        for _ in range(mesh_data['Nfp']):
+    for i in range(lam.shape[0] // mesh.Nfp):
+        max_lam_edge = bkd.maxval(lam[i * mesh.Nfp : (i + 1) * mesh.Nfp, :], axis=0)
+        for _ in range(mesh.Nfp):
             max_lam_edges.append(max_lam_edge)
     lam = bk.vstack(max_lam_edges)
+    PROFILER["wave_speed"].append(time.time() - t0)
 
-    # 9. Final boundary flux
+    # Compute final boundary flux and assembly
+    t0 = time.time()
     bd_flux = [
         calculate_bd_flux(
-            FuP[i], FuM[i], GuP[i], GuM[i],
-            uPuMuPM2[i][1], uPuMuPM2[i][0],
-            gXgYgXPMgYPM[i][2], gXgYgXPMgYPM[i][3],
+            FuP[i],
+            FuM[i],
+            GuP[i],
+            GuM[i],
+            uPuMuPM2[i][1],
+            uPuMuPM2[i][0],
+            gXgYgXPMgYPM[i][2],
+            gXgYgXPMgYPM[i][3],
             lam,
-            mesh_data['LIFT'], mesh_data['Fscale'], mesh_data['nx'], mesh_data['ny'],
+            mesh.LIFT,
+            mesh.Fscale,
+            mesh.nx,
+            mesh.ny,
         )
         for i in range(4)
     ]
+    rhsu = bk.stack([int_flux[i] - bd_flux[i] for i in range(4)])
+    PROFILER["rhs_assembly"].append(time.time() - t0)
+    return rhsu
 
-    return bk.stack([int_flux[i] - bd_flux[i] for i in range(4)])
 
 class Euler2D:
     def __init__(self, params, manual_reset=False):
@@ -202,8 +233,6 @@ class Euler2D:
         self.mesh = Mesh2D(params)
         if not manual_reset:
             self.reset()
-
-        self.profiler = defaultdict(list)
 
     def reset(self, state=None):
         if not self.mesh.is_init:
@@ -233,34 +262,14 @@ class Euler2D:
             for field in ["u", "u_old", "time", "dt", "iter", "done"]:
                 self.__dict__[field] = getattr(state, field)
 
-        self.mesh_data = {
-            'vmapP_C': self.mesh.vmapP_C,
-            'vmapM_C': self.mesh.vmapM_C,
-            'vmapP_shape': self.mesh.vmapP.shape,
-            'vmapM_shape': self.mesh.vmapM.shape,
-            'LIFT': self.mesh.LIFT,
-            'Fscale': self.mesh.Fscale,
-            'nx': self.mesh.nx,
-            'ny': self.mesh.ny,
-            'Drw': self.mesh.Drw,
-            'Dsw': self.mesh.Dsw,
-            'rx': self.mesh.rx,
-            'sx': self.mesh.sx,
-            'ry': self.mesh.ry,
-            'sy': self.mesh.sy,
-            'Nfp': self.mesh.Nfp
-        }
-        
-        self.model_params = {'gamma': self.params.gas_gamma}
-
-        # Create the partial function with fixed mesh and model
-        # Note: mu_vals is NOT bound here because it changes every step
-        self._rhs_compiled = bkd.jit(functools.partial(
-            rhs_kernel,
-            mesh_data=self.mesh_data,
-            model=self.params.model,
-            gas_gamma=self.params.gas_gamma
-        ))
+        self._rhs_compiled = bkd.jit(
+            functools.partial(
+                rhs_kernel,
+                mesh=self.mesh,
+                model=self.params.model,
+                gas_gamma=self.params.gas_gamma,
+            )
+        )
 
     def _wave_speed(self):
         pre = self.params.model.pre(self.u)
@@ -276,7 +285,7 @@ class Euler2D:
 
         print(f"{'Metric':<30} | {'Median Time (s)':<15}")
         print("-" * 50)
-        for key, times in self.profiler.items():
+        for key, times in PROFILER.items():
             if times:
                 median_time = statistics.median(times)
                 print(f"{key:<30} | {median_time:<15.6f}")
@@ -314,7 +323,7 @@ class Euler2D:
                     + mu_max * self.mesh.N2**2 / self.mesh.min_hK**2
                 )
 
-        self.profiler["mu_compute"].append(time.time() - t0)
+        PROFILER["mu_compute"].append(time.time() - t0)
 
         t0 = time.time()
         self.u_old_old = self.u_old
@@ -328,7 +337,7 @@ class Euler2D:
             self.done = True
         self.iter += 1
 
-        self.profiler["integration"].append(time.time() - t0)
+        PROFILER["integration"].append(time.time() - t0)
         return not self.done
 
     def _rhs_weak(self, u):

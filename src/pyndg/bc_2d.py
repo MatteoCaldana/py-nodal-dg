@@ -10,3 +10,6 @@ class BC(IntEnum):
     Dirichlet = 5
     Sym = 6
     Periodic = 7
+    Wall = 8
+    Cyl = 9
+    Neuman = 10

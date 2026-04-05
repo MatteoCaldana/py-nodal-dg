@@ -30,9 +30,9 @@ def smooth_viscosity(mu, mesh):
 
 
 def smooth_viscosity_2d(mu, mesh):
-    assert len(mu) == np.max(mu.shape)
+    assert mu.reshape((-1,)).shape[0] == np.max(mu.shape)
     mu_avg = (mesh.VToE @ mu.T).reshape((-1,)) / mesh.neighbors
-    mu_int = mesh.interp_matrix @ mu_avg[mesh.EToV0T_flat]
+    mu_int = mesh.interp_matrix @ mu_avg[mesh.EToVT_flat]
     return bkd.reshape(mu_int, (mesh.Np, mesh.K), order="F")
 
 

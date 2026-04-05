@@ -16,10 +16,6 @@ if "PYNDG_BACKEND" in os.environ:
         BACKEND = NUMPY
     elif backend_str == "torch":
         BACKEND = TORCH
-        if torch.cuda.is_available():
-            DEVICE = "cuda"
-        else:
-            DEVICE = "cpu"
     elif backend_str == "jax":
         BACKEND = JAX
     else:
@@ -33,6 +29,10 @@ if BACKEND == NUMPY:
     import numpy as bkd
 if BACKEND == TORCH:
     import torch as bkd
+    if torch.cuda.is_available():
+        DEVICE = "cuda"
+    else:
+        DEVICE = "cpu"
 if BACKEND == JAX:
     import jax.numpy as bkd
 
