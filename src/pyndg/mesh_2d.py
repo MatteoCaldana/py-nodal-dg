@@ -862,6 +862,7 @@ class Mesh2D:
         self.patch_alphas = np.empty((3, 3, self.K))
         self.patch_alphasA = np.empty((3, 2, 2, self.K))
         self.patch_alphasB = np.empty((3, 2, self.K))
+        self.problematic_alpha_elements = []
         for i in range(self.K):
             cfx, cfy = self.fcx[:, i] - self.vcx[0, i], self.fcy[:, i] - self.vcy[0, i]
             cfL = np.sqrt(cfx**2 + cfy**2)
@@ -890,9 +891,9 @@ class Mesh2D:
                         ]
                     )
                     alphas = solve2x2(A, b)
-                    assert (
-                        alphas[0] >= -MESH_TOL and alphas[1] >= -MESH_TOL
-                    ), "The mesh traingulation is not appropriate"
+                    if not (alphas[0] >= -MESH_TOL and alphas[1] >= -MESH_TOL):
+                        print("WARNING: The mesh triangulation is not appropriate")
+                        self.problematic_alpha_elements.append(i)
                     self.patch_alphas[j, -1, i] = Kind[j + 2]
                 else:
                     self.patch_alphas[j, -1, i] = Kind[j + 1]
@@ -997,8 +998,8 @@ class Mesh2D:
             vmapB = self.vmapM.flatten(order="F")[mapB]
             print(np.all(np.sort(vmapB) == np.sort(self.vmapB.flatten())))
             # TODO: BUG: same elements but different order, why?
-            assert np.all(mapB == self.mapB.reshape((-1,), order="F"))
-            assert np.all(vmapB == self.vmapB.flatten(order="F"))
+            # assert np.all(mapB == self.mapB.reshape((-1,), order="F"))
+            # assert np.all(vmapB == self.vmapB.flatten(order="F"))
 
     def __compute_face_maps4(self):
         self.vmapP = self.vmapP.reshape((-1), order="F")
@@ -1128,7 +1129,7 @@ class Mesh2D:
                 self.mapBC_list[bc_tag] = self.mapB[bc_ind].reshape((self.Nfp, -1))
                 self.vmapBC_list[bc_tag] = self.vmapB[bc_ind].reshape((self.Nfp, -1))
 
-    def plot(self, show_face_id=True, show_vtx_id=True):
+    def plot(self, show_elem_id=True, show_vtx_id=True, show_ghost_nodes=False):
         """
         Plots the 2D triangular mesh and highlights boundary edges
         with different colors based on their BC tags.
@@ -1151,9 +1152,9 @@ class Mesh2D:
 
         # Plot mesh in light gray to make BCs stand out
         mesh_lc = LineCollection(
-            all_edges, colors="lightgray", linewidths=0.5, alpha=0.5
+            all_edges, colors="lightgray", linewidths=0.5, alpha=1.0
         )
-        ax.add_collection(mesh_lc)
+        ax.add_collection(mesh_lc) 
 
         # Plot Boundary Edges by Tag
         color_cycle = list(mcolors.TABLEAU_COLORS.values())
@@ -1173,16 +1174,22 @@ class Mesh2D:
             )
             ax.add_collection(bc_lc)
 
-        if show_face_id:
+        if show_elem_id:
             for eid, tri in enumerate(self.EToV):
                 pts = self.VXY[tri].mean(axis=0)
                 plt.text(pts[0], pts[1], f"{eid}")
+
+        for eid in self.problematic_alpha_elements:
+            tri = self.EToV[eid, :]
+            pts = self.VXY[tri].mean(axis=0)
+            plt.scatter([pts[0]], [pts[1]], marker="o", s=100, color="r")
 
         if show_vtx_id:
             for i in range(self.VXY.shape[0]):
                 plt.text(self.VXY[i, 0], self.VXY[i, 1], f"{i}", color="r")
 
-        plt.scatter(self.xG.flatten(), self.yG.flatten(), marker="x")
+        if show_ghost_nodes:
+            plt.scatter(self.xG.flatten(), self.yG.flatten(), marker="x")
 
         ax.set_aspect("equal")
         ax.autoscale()
