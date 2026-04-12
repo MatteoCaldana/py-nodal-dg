@@ -1,0 +1,416 @@
+import scipy.io
+from scipy.sparse.linalg import spsolve_triangular
+import numpy as np
+import time
+
+
+class State:
+    def __init__(self, data):
+        # Scalars
+        self.time = data["time"].item()
+        self.dt = data["dt"].item()
+        self.tstep = data["tstep"].item()
+        self.nu = data["nu"].item()
+
+        # State Vectors
+        self.Ux = data["Ux"]
+        self.Uy = data["Uy"]
+        self.UxT = data["UxT"]
+        self.UyT = data["UyT"]
+        self.UxTT = data["UxTT"]
+        self.UyTT = data["UyTT"]
+        self.Uxold = data["Uxold"]
+        self.Uyold = data["Uyold"]
+        self.NUx = data["NUx"]
+        self.NUy = data["NUy"]
+        self.dpdn = data["dpdn"]
+
+        # Boundary / Reference Data
+        self.refbcUx = data["refbcUx"]
+        self.refrhsbcUx = data["refrhsbcUx"]
+        self.refbcUy = data["refbcUy"]
+        self.refrhsbcUy = data["refrhsbcUy"]
+        self.refbcPR = data["refbcPR"]
+        self.refrhsbcPR = data["refrhsbcPR"]
+        self.refbcdUndt = data["refbcdUndt"]
+
+        # system
+        self.PRsystemC = data["PRsystemC"].tocsr()
+        self.PRperm = data["PRperm"].astype(np.int32).squeeze() - 1
+        self.VELsystemC = data["VELsystemC"].tocsr()
+        self.VELperm = data["VELperm"].astype(np.int32).squeeze() - 1
+
+        # splitting coef
+        self.a0 = data["a0"].item()
+        self.a1 = data["a1"].item()
+        self.b0 = data["b0"].item()
+        self.b1 = data["b1"].item()
+        self.g0 = data["g0"].item()
+
+
+class Mesh:
+    def __init__(self, data):
+        # Dimensions
+        self.Np = int(data["Np"].item())
+        self.Nfp = int(data["Nfp"].item())
+        self.N = int(data["N"].item())
+        self.K = int(data["K"].item())
+        self.Nfaces = int(data["Nfaces"].item())
+        self.NODETOL = data["NODETOL"].item()
+
+        # Coordinates & Grid
+        self.r = data["r"]
+        self.s = data["s"]
+        self.x = data["x"]
+        self.y = data["y"]
+        self.VX = data["VX"]
+        self.VY = data["VY"]
+
+        # Operators
+        self.Dr = data["Dr"]
+        self.Ds = data["Ds"]
+        self.LIFT = data["LIFT"]
+        self.Drw = data["Drw"]
+        self.Dsw = data["Dsw"]
+        self.MassMatrix = data["MassMatrix"]
+        self.V = data["V"]
+        self.invV = data["invV"]
+
+        # Geometric Factors
+        self.Fx = data["Fx"]
+        self.Fy = data["Fy"]
+        self.nx = data["nx"]
+        self.ny = data["ny"]
+        self.jac = data["jac"]
+        self.J = data["J"]
+        self.sJ = data["sJ"]
+        self.Fscale = data["Fscale"]
+        self.rx = data["rx"]
+        self.ry = data["ry"]
+        self.sx = data["sx"]
+        self.sy = data["sy"]
+
+        # Connectivity and Mapping (Corrected for 0-based indexing)
+        idx_vars = [
+            "vmapM",
+            "vmapP",
+            "vmapI",
+            "vmapO",
+            "vmapW",
+            "vmapC",
+            "mapB",
+            "mapI",
+            "mapO",
+            "mapW",
+            "mapC",
+            "mapM",
+            "mapP",
+        ]
+
+        def make_order_c(shape):
+            range = np.arange(shape[0] * shape[1], dtype=np.int32)
+            orderF = range.reshape(shape, order="F")
+            orderC = np.empty(range.shape, dtype=int)
+            orderC[orderF.flat] = range
+            return orderC, orderF
+
+        order_c_v, _ = make_order_c(self.x.shape)
+        order_c_f, order_f_f = make_order_c(self.Fx.shape)
+
+        for var in idx_vars:
+            if var in data:
+                # Subtract 1 from MATLAB indices to work in Python
+                assert (data[var].shape[1] == 1) and (data[var].shape[0] > 1)
+                data[var] = data[var].ravel().astype(np.int32)
+                data[var] -= 1
+                map = data[var]
+                if var.startswith("v"):
+                    mapC = order_c_v[map]
+                    # plus/minus face mappings
+                    # the ouput are faces in F order
+                    if var.endswith("P") or var.endswith("M"):
+                        mapC = mapC[order_f_f.flat]
+                else:
+                    mapC = order_c_f[map]
+
+                setattr(self, var, map)
+                setattr(self, var + "C", mapC)
+
+
+def ins2d_step(mesh, state):
+    temporal_scaling(state)
+    ins2d_advection(mesh, state)
+    ins2d_pressure(mesh, state)
+    ins2d_viscous(mesh, state)
+    ins2d_render(mesh, state)
+    ins2d_lift_drag(mesh, state)
+    state.time = state.tstep * state.dt
+    state.tstep += 1
+
+
+def temporal_scaling(state):
+    time = state.time
+    dt = state.dt
+
+    # Time factors
+    tfac = np.sin(np.pi * time / 8)
+    tfac1 = np.sin(np.pi * (time + dt) / 8)
+    tpfac = (np.pi / 8) * np.cos(np.pi * time / 8)
+    tpfac1 = (np.pi / 8) * np.cos(np.pi * time / 8)
+    tpfac2 = (np.pi / 8) * np.cos(np.pi * time / 8)
+
+    # Boundary condition calculations
+    state.bcUx = tfac * state.refbcUx
+    state.rhsbcUx = tfac1 * state.refrhsbcUx
+    state.bcUy = tfac * state.refbcUy
+    state.rhsbcUy = tfac1 * state.refrhsbcUy
+    state.bcPR = tpfac1 * state.refbcPR
+    state.rhsbcPR = tpfac2 * state.refrhsbcPR
+    state.bcdUndt = tpfac * state.refbcdUndt
+
+
+def Div2D(mesh, u, v):
+    ur = mesh.Dr @ u
+    us = mesh.Ds @ u
+    vr = mesh.Dr @ v
+    vs = mesh.Ds @ v
+    return mesh.rx * ur + mesh.sx * us + mesh.ry * vr + mesh.sy * vs
+
+
+def Curl2D(mesh, ux, uy):
+    uxr = mesh.Dr @ ux
+    uxs = mesh.Ds @ ux
+    uyr = mesh.Dr @ uy
+    uys = mesh.Ds @ uy
+    return mesh.rx * uyr + mesh.sx * uys - mesh.ry * uxr - mesh.sy * uxs
+
+
+def Grad2D(mesh, u):
+    ur = mesh.Dr @ u
+    us = mesh.Ds @ u
+
+    ux = mesh.rx * ur + mesh.sx * us
+    uy = mesh.ry * ur + mesh.sy * us
+    return ux, uy
+
+
+def ins2d_advection(mesh, state):
+    # 1. Evaluate flux vectors
+    fxUx = state.Ux * state.Ux
+    fyUx = state.Ux * state.Uy
+    fxUy = state.Ux * state.Uy
+    fyUy = state.Uy * state.Uy
+
+    # 2. Save old nonlinear terms
+    NUxold = state.NUx.copy()
+    NUyold = state.NUy.copy()
+
+    # 3. Evaluate inner-product (Assuming Div2D is defined elsewhere in your Python code)
+    state.NUx = Div2D(mesh, fxUx, fyUx)
+    state.NUy = Div2D(mesh, fxUy, fyUy)
+
+    # 4. Interpolate velocity to face nodes
+    UxM = state.Ux.flat[mesh.vmapMC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
+    UyM = state.Uy.flat[mesh.vmapMC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
+    UxP = state.Ux.flat[mesh.vmapPC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
+    UyP = state.Uy.flat[mesh.vmapPC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
+
+    # 5. Set '+' trace at boundary face nodes
+    UxP.flat[mesh.mapIC] = state.bcUx.flat[mesh.mapIC]
+    UxP.flat[mesh.mapWC] = state.bcUx.flat[mesh.mapWC]
+    UxP.flat[mesh.mapCC] = state.bcUx.flat[mesh.mapCC]
+    UyP.flat[mesh.mapIC] = state.bcUy.flat[mesh.mapIC]
+    UyP.flat[mesh.mapWC] = state.bcUy.flat[mesh.mapWC]
+    UyP.flat[mesh.mapCC] = state.bcUy.flat[mesh.mapCC]
+
+    # 6. Evaluate flux vectors at face nodes
+    fxUxM = UxM * UxM
+    fyUxM = UyM * UxM
+    fxUyM = UxM * UyM
+    fyUyM = UyM * UyM
+    fxUxP = UxP * UxP
+    fyUxP = UyP * UxP
+    fxUyP = UxP * UyP
+    fyUyP = UyP * UyP
+
+    # 7. Normal velocity and Lax-Friedrichs/Rusonov flux
+    UDotNM = UxM * mesh.nx + UyM * mesh.ny
+    UDotNP = UxP * mesh.nx + UyP * mesh.ny
+    maxvel = np.maximum(np.abs(UDotNM), np.abs(UDotNP))
+
+    # 8. Evaluate maximum normal velocity over each face
+    for f in range(mesh.Nfaces):
+        maxvel[f * mesh.Nfp : (f + 1) * mesh.Nfp, :] = np.max(
+            maxvel[f * mesh.Nfp : (f + 1) * mesh.Nfp, :], axis=0
+        )
+
+    # 9. Form Fluxes
+    fluxUx = 0.5 * (
+        -mesh.nx * (fxUxM - fxUxP) - mesh.ny * (fyUxM - fyUxP) - maxvel * (UxP - UxM)
+    )
+    fluxUy = 0.5 * (
+        -mesh.nx * (fxUyM - fxUyP) - mesh.ny * (fyUyM - fyUyP) - maxvel * (UyP - UyM)
+    )
+
+    # 10. Combine volume and surface terms
+    # Use @ for matrix multiplication with LIFT
+    state.NUx = state.NUx + mesh.LIFT @ (mesh.Fscale * fluxUx)
+    state.NUy = state.NUy + mesh.LIFT @ (mesh.Fscale * fluxUy)
+
+    # 11. Compute intermediate velocity (U~, V~)
+    state.UxT = (
+        (state.a0 * state.Ux + state.a1 * state.Uxold)
+        - state.dt * (state.b0 * state.NUx + state.b1 * NUxold)
+    ) / state.g0
+    state.UyT = (
+        (state.a0 * state.Uy + state.a1 * state.Uyold)
+        - state.dt * (state.b0 * state.NUy + state.b1 * NUyold)
+    ) / state.g0
+
+
+def ins2d_pressure(mesh, state):
+    DivUT = Div2D(mesh, state.UxT, state.UyT)
+
+    # 2. Compute dp/dn components
+    CurlU = Curl2D(mesh, state.Ux, state.Uy)
+    dCurlUdx, dCurlUdy = Grad2D(mesh, CurlU)
+
+    res1 = -state.NUx - state.nu * dCurlUdy
+    res2 = -state.NUy + state.nu * dCurlUdx
+
+    # 3. Save old and compute new dp/dn
+    dpdnold = state.dpdn.copy()
+
+    # 4. Deciding Neumann nodes (Concatenating boundary maps)
+    nbcmapD = np.concatenate([mesh.mapIC, mesh.mapWC, mesh.mapCC])
+    vbcmapD = np.concatenate([mesh.vmapIC, mesh.vmapWC, mesh.vmapCC])
+
+    # dpdn(nbcmapD) = nx.*res1 + ny.*res2
+    state.dpdn = np.zeros_like(state.dpdn)
+    state.dpdn.flat[nbcmapD] = (
+        mesh.nx.flat[nbcmapD] * res1.flat[vbcmapD]
+        + mesh.ny.flat[nbcmapD] * res2.flat[vbcmapD]
+    )
+
+    # Update and subtract boundary forcing
+    state.dpdn -= state.bcdUndt
+
+    # 5. Evaluate RHS for Pressure Poisson Equation
+    term_vol = mesh.J * (-DivUT * state.g0 / state.dt)
+    term_sur = mesh.LIFT @ (mesh.sJ * (state.b0 * state.dpdn + state.b1 * dpdnold))
+    PRrhs = mesh.MassMatrix @ (term_vol + term_sur)
+
+    # 6. Add Dirichlet boundary forcing
+    PRrhs_flat = PRrhs.ravel(order="F") + state.rhsbcPR.ravel(order="F")
+    PRrhs_flat = PRrhs_flat[state.PRperm]
+
+    # 7. Pressure Solve (Assuming PRperm, PRsystemCT, PRsystemC are pre-computed)
+    tmp = spsolve_triangular(state.PRsystemC.T, PRrhs_flat, lower=True)
+    PR_sol = spsolve_triangular(state.PRsystemC, tmp, lower=False)
+
+    # Reconstruct PR array using the permutation
+    PR = np.empty_like(PR_sol)
+    PR[state.PRperm] = PR_sol
+    PR = PR.reshape((mesh.Np, mesh.K), order="F")
+
+    # 8. Compute (U~~, V~~) = (U~, V~) - dt*grad PR
+    dPRdx, dPRdy = Grad2D(mesh, PR)
+
+    # 9. Increment to (Ux~~, Uy~~)
+    state.UxTT = state.UxT - state.dt * (dPRdx) / state.g0
+    state.UyTT = state.UyT - state.dt * (dPRdy) / state.g0
+
+
+def ins2d_viscous(mesh, state):
+    J_mean = np.mean(mesh.J, axis=0)
+
+    mmUxTT = J_mean * (mesh.MassMatrix @ state.UxTT)
+    mmUyTT = J_mean * (mesh.MassMatrix @ state.UyTT)
+
+    # 2. Formulate the full RHS for the Helmholtz system
+    Uxrhs_flat = (state.g0 * mmUxTT.ravel(order="F")) / (
+        state.nu * state.dt
+    ) + state.rhsbcUx.ravel(order="F")
+    Uyrhs_flat = (state.g0 * mmUyTT.ravel(order="F")) / (
+        state.nu * state.dt
+    ) + state.rhsbcUy.ravel(order="F")
+
+    # 3. Save current velocity to old variables
+    state.Uxold = state.Ux.copy()
+    state.Uyold = state.Uy.copy()
+
+    # Backsolve twice (Assuming VELsystemCT and VELsystemC are the factored matrices)
+    Uxrhs_flat = Uxrhs_flat[state.VELperm]
+    tmp_x = spsolve_triangular(state.VELsystemC.T, Uxrhs_flat, lower=True)
+    Ux_sol = spsolve_triangular(state.VELsystemC, tmp_x, lower=False)
+    Uyrhs_flat = Uyrhs_flat[state.VELperm]
+    tmp_y = spsolve_triangular(state.VELsystemC.T, Uyrhs_flat, lower=True)
+    Uy_sol = spsolve_triangular(state.VELsystemC, tmp_y, lower=False)
+
+    # Update the state variables
+    tmp_Ux = np.empty_like(Ux_sol)
+    tmp_Ux[state.VELperm] = Ux_sol
+    state.Ux = tmp_Ux.reshape((mesh.Np, mesh.K), order="F")
+    tmp_Uy = np.empty_like(Uy_sol)
+    tmp_Uy[state.VELperm] = Uy_sol
+    state.Uy = tmp_Uy.reshape((mesh.Np, mesh.K), order="F")
+
+
+def ins2d_render(mesh, state):
+    pass
+
+
+def ins2d_lift_drag(mesh, state):
+    pass
+
+
+def load(file_path):
+    data = scipy.io.loadmat(file_path)
+    state = State(data)
+    mesh = Mesh(data)
+    return state, mesh
+
+
+def compare(state, state_ref):
+    for field in dir(state_ref):
+        if field.startswith("__"):
+            continue
+
+        try:
+            v = getattr(state, field)
+            vr = getattr(state_ref, field)
+            diff = np.max(np.abs(v - vr))
+            print(f"{field:12}: {diff < 1e-14} {diff:.4e}")
+        except:
+            pass
+    print("===============================")
+
+
+if __name__ == "__main__":
+    import cProfile
+    import pstats
+
+    DIR = "/home/matteo/Documents/nodal-dg/Codes1.1/"
+
+    state, mesh = load(DIR + "INS2D_2.mat")
+    do_check = True
+
+    def run():
+        t0 = time.time()  # 6.5[s] for 1k steps
+        for step in range(2, 20):
+            ins2d_step(mesh, state)
+            if do_check:
+                state_ref, _ = load(DIR + f"INS2D_{step + 1}.mat")
+                compare(state, state_ref)
+        dt = time.time() - t0
+        print(f"Elapsed {dt:.4f}")
+
+    if do_check:
+        run()
+    else:
+        run()
+        # with cProfile.Profile() as pr:
+        #     run()
+
+        # stats = pstats.Stats(pr)
+        # stats.sort_stats("cumulative").print_stats()
