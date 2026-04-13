@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 from scipy import sparse
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import reverse_cuthill_mckee
 
 from .scalar_param_2d import ScalarParam2D
 from .euler_param_2d import EulerParam2D
@@ -187,7 +189,7 @@ def mesh_reader_gambit_bc_2d(file_name):
         "Far": BC.Far,
         "Cyl": BC.Cyl,
         "Dirichlet": BC.Dirichlet,
-        "Neuman": BC.Neuman,
+        "Neuman": BC.Neumann,
         "Slip": BC.Slip,
     }
 
@@ -246,6 +248,7 @@ def mesh_reader_gambit_bc_2d(file_name):
 
 
 ALPHA_OPT = [
+    None,
     0.0000,
     0.0000,
     1.4152,
@@ -440,7 +443,7 @@ class Mesh2D:
             return
         params = self.params
         self.has_periodic_bc = params.has_periodic_bc
-        self.bc = params.bc if params.bc != {} else {k: k for k in range(1, len(BC))}
+        self.bc = params.bc if params.bc != {} else {k: k for k in range(len(BC))}
         self.N = params.N
         self.N2 = np.array(self.N**2, dtype=np.float64)
         self.Nfp = self.N + 1
@@ -470,44 +473,48 @@ class Mesh2D:
 
         assert set(self.BFaces.keys()) <= set(self.bc.keys())
         assert all([isinstance(k, int | BC) for k in self.bc.keys()])
-        assert all([k != 0 for k in self.bc.keys()]), "BC Tag 0 is reserved"
+        if 0 in self.bc.keys():
+            assert self.bc[0] == 0, "BC Tag 0 is reserved"
 
         print("Pre-computing geometric quantities")
         self.VX, self.VY = self.VXY[:, 0], self.VXY[:, 1]
         print("Pre-computing geometric quantities: node")
-        self.__compute_nodes()
+        self._compute_nodes()
         print("Pre-computing geometric quantities: matrices")
-        self.__compute_basic_matrices()
+        self._compute_basic_matrices()
         print("Pre-computing geometric quantities: coordinates")
-        self.__compute_nodes_coordinates()
+        self._compute_nodes_coordinates()
         print("Pre-computing geometric quantities: face mask")
-        self.__compute_cell_face_masks()
+        self._compute_cell_face_masks()
+        self._compute_mass_edge()
         print("Pre-computing geometric quantities: surface integrals")
-        self.__compute_surface_integrals()
+        self._compute_surface_integrals()
         print("Pre-computing geometric quantities: averages")
-        self.__compute_averaging()
+        self._compute_averaging()
         print("Pre-computing geometric quantities: transform factors")
-        self.__compute_geometric_transform_factor()
+        self._compute_geometric_transform_factor()
         print("Pre-computing geometric quantities: face normal data")
-        self.__compute_face_normal_data()
+        self._compute_face_normal_data()
         print("Pre-computing geometric quantities: radius incircle")
-        self.__compute_radius_incircle()
+        self._compute_radius_incircle()
         print("Pre-computing geometric quantities: connectivity")
-        self.__compute_connectivity_matrix()
+        self._compute_connectivity_matrix()
+        self._compute_neighbours()
+        self._analyze_graph_bandwidth()
         print("Pre-computing geometric quantities: boundary conditions")
-        self.__compute_bc_tags()
+        self._compute_bc_tags()
         print("Pre-computing geometric quantities: ghost elements")
-        self.__compute_ghost_elements_essential()
+        self._compute_ghost_elements_essential()
         print("Pre-computing geometric quantities: face maps")
-        self.__compute_face_maps()
+        self._compute_face_maps()
         print("Pre-computing geometric quantities: weak operators")
-        self.__compute_weak_operators()
+        self._compute_weak_operators()
         print("Pre-computing geometric quantities: interpolation")
-        self.__compute_interpolation_matrix()
+        self._compute_interpolation_matrix()
         print("Pre-computing geometric quantities: essential bcs")
-        self.__compute_essential_bc()
+        self._compute_essential_bc()
         if len(self.bc_essential):
-            self.__compute_ghost_elements()
+            self._compute_ghost_elements()
 
         self.min_dx = np.min(self.dx)
         self.vmapP_C = mapFtoCflat(self.vmapP)
@@ -517,9 +524,9 @@ class Mesh2D:
         self.yf = self.y.reshape((-1,), order="F")
 
         print("Pre-computing geometric quantities: slices")
-        self.__compute_slices()
+        self._compute_slices()
         print("Pre-computing geometric quantities: meshgrid interp")
-        self.__compute_meshgrid_interp_matrix()
+        self._compute_meshgrid_interp_matrix()
         print("Pre-compute minimal edge length:", end=" ")
         self.min_hK = self._get_minimal_face_length()
         print(f"{self.min_hK:.2e}")
@@ -528,7 +535,7 @@ class Mesh2D:
             self.__dict__[field] = bkd.to_const(self.__dict__[field])
         self.is_init = True
 
-    def __compute_slices(self):
+    def _compute_slices(self):
         self.Ne1D = int(self.Nv**0.5) - 1
         hh = np.arange(self.Ne1D) / self.Ne1D
         self.slices = np.array([*np.add.outer(hh, self.x[: self.N, 0]).flatten(), 1])
@@ -538,7 +545,7 @@ class Mesh2D:
             i = i[np.argsort(self.xf[i], kind="stable")]
             self.slices_idx.append(i)
 
-    def __compute_meshgrid_interp_matrix(self):
+    def _compute_meshgrid_interp_matrix(self):
         self.Ne = self.x.shape[1]
         self.meshgrid_interp_ijv = []
         for kx in range(self.Ne):
@@ -579,18 +586,30 @@ class Mesh2D:
         fL = np.sqrt(fnx**2 + fny**2)
         return np.min(fL)
 
-    def __compute_nodes(self):
+    def _compute_nodes(self):
         self.xrs, self.yrs = nodes_2d(self.N)
         self.r, self.s = xytors(self.xrs, self.yrs)
         self.rs, self.r1, self.s1 = self.r + self.s, self.r + 1, self.s + 1
 
-    def __compute_basic_matrices(self):
+    def _compute_mass_edge(self):
+        N = self.params.N
+        Np = self.Np
+        self.mass_edge = np.zeros((Np, Np, 3))
+
+        for i, face in enumerate(["r", "r", "s"]):
+            Fm = self.Fmask[:, i]
+            face = getattr(self, face)[Fm]
+            V1D = vandermonde1D(N, face)
+            self.mass_edge[..., i][np.ix_(Fm, Fm)] = np.linalg.inv(V1D @ V1D.T)
+
+    def _compute_basic_matrices(self):
         self.V = vandermonde2D(self.N, self.r, self.s)
         self.invV = np.linalg.inv(self.V)
         self.M = np.matmul(self.invV.T, self.invV)
         self.Dr, self.Ds = dmatrices2D(self.N, self.r, self.s, self.V)
+        self.mass = self.invV.T @ self.invV
 
-    def __compute_nodes_coordinates(self):
+    def _compute_nodes_coordinates(self):
         self.x = 0.5 * (
             -np.outer(self.rs, self.VX[self.EToV[:, 0]])
             + np.outer(self.r1, self.VX[self.EToV[:, 1]])
@@ -602,7 +621,7 @@ class Mesh2D:
             + np.outer(self.s1, self.VY[self.EToV[:, 2]])
         )
 
-    def __compute_cell_face_masks(self):
+    def _compute_cell_face_masks(self):
         fmask1 = np.where(np.abs(self.s1).reshape((-1,), order="F") < MESH_TOL)[0]
         fmask2 = np.where(np.abs(self.rs).reshape((-1,), order="F") < MESH_TOL)[0]
         fmask3 = np.where(np.abs(self.r1).reshape((-1,), order="F") < MESH_TOL)[0]
@@ -610,7 +629,7 @@ class Mesh2D:
         self.Fx = self.x[self.Fmask.reshape((-1,), order="F"), :]
         self.Fy = self.y[self.Fmask.reshape((-1,), order="F"), :]
 
-    def __compute_surface_integrals(self):
+    def _compute_surface_integrals(self):
         self.Emat = np.zeros((self.Np, 3 * self.Nfp))
         self.Vmid1D = vandermonde1D(self.N, np.zeros_like(self.r))
 
@@ -634,24 +653,32 @@ class Mesh2D:
 
         self.LIFT = np.matmul(self.V, np.matmul(self.V.T, self.Emat))
 
-    def __compute_averaging(self):
+    def _compute_averaging(self):
         self.AVG2D = np.sum(self.M, axis=0) / 2
         self.AVG1D_1 = np.sum(self.M1D_1, axis=0) / 2
         self.AVG1D_2 = np.sum(self.M1D_2, axis=0) / 2
         self.AVG1D_3 = np.sum(self.M1D_3, axis=0) / 2
 
-    def __compute_geometric_transform_factor(self):
+    def _compute_geometric_transform_factor(self):
         self.xr = np.matmul(self.Dr, self.x)
         self.xs = np.matmul(self.Ds, self.x)
         self.yr = np.matmul(self.Dr, self.y)
         self.ys = np.matmul(self.Ds, self.y)
+
         self.J = -self.xs * self.yr + self.xr * self.ys
+        self.J_avg = self.J.mean(axis=0)
+
         self.rx = self.ys / self.J
         self.sx = -self.yr / self.J
         self.ry = -self.xs / self.J
         self.sy = self.xr / self.J
 
-    def __compute_face_normal_data(self):
+        self.rx_avg = self.rx.mean(axis=0)
+        self.sx_avg = self.sx.mean(axis=0)
+        self.ry_avg = self.ry.mean(axis=0)
+        self.sy_avg = self.sy.mean(axis=0)
+
+    def _compute_face_normal_data(self):
         Fmask_flat = self.Fmask.reshape((-1,), order="F")
         self.fxr = self.xr[Fmask_flat, :]
         self.fxs = self.xs[Fmask_flat, :]
@@ -679,7 +706,7 @@ class Mesh2D:
 
         self.Fscale = self.sJ / self.J[Fmask_flat, :]
 
-    def __compute_radius_incircle(self):
+    def _compute_radius_incircle(self):
         vmask1 = np.where(np.abs(self.s + self.r + 2) < MESH_TOL)[0]
         vmask2 = np.where(np.abs(self.r - 1) < MESH_TOL)[0]
         vmask3 = np.where(np.abs(self.s - 1) < MESH_TOL)[0]
@@ -696,7 +723,7 @@ class Mesh2D:
         self.dx = area / sper
         self.dx2 = len1 * len2 * len3 / area / 4
 
-    def __lfind(self, f):
+    def _lfind(self, f):
         elem_listA, _ = np.where(self.EToV == f[0])
         elem_listB, _ = np.where(self.EToV == f[1])
         elem = list(set(elem_listA) & set(elem_listB))
@@ -708,7 +735,7 @@ class Mesh2D:
             lind if (self.EToV[elem, (lind + 1) % 3] == f[1]).all() else (lind + 2) % 3,
         )
 
-    def __compute_connectivity_matrix(self):
+    def _compute_connectivity_matrix(self):
         total_faces = 3 * self.K
         i = np.repeat(np.arange(total_faces), 2)
         j = self.EToV[:, [0, 1, 1, 2, 0, 2]].reshape((-1,))
@@ -738,9 +765,9 @@ class Mesh2D:
                 pflink = self.PerBFToF_map[bf1]
                 for j in range(face_list1.shape[0]):
                     f1 = face_list1[j, :]
-                    elem1, lfind1 = self.__lfind(f1)
+                    elem1, lfind1 = self._lfind(f1)
                     f2 = face_list2[np.abs(pflink[j]) - 1, :].reshape((-1,))
-                    elem2, lfind2 = self.__lfind(f2)
+                    elem2, lfind2 = self._lfind(f2)
 
                     self.EToE[elem1, lfind1] = elem2
                     self.EToE[elem2, lfind2] = elem1
@@ -766,7 +793,75 @@ class Mesh2D:
             k: np.concatenate(self.PShift[k]).reshape((-1, 3)) for k in self.PShift
         }
 
-    def __compute_bc_tags(self):
+    def _compute_neighbours(self):
+        cell_id1 = np.repeat(np.arange(self.K), self.EToE.shape[1])
+        cell_id12 = np.stack([cell_id1, self.EToE.flat], axis=1)
+        # sort elements within each row
+        cell_id12 = np.sort(cell_id12, axis=1)
+        # sort rows lexicographycally
+        cell_id12 = cell_id12[np.lexsort(cell_id12.T[::-1])]
+        # remove conne tion of element with self
+        cell_id12 = cell_id12[~np.all(cell_id12 == cell_id12[:, [0]], axis=1)]
+        # remove duplicates
+        mask = np.any(cell_id12[1:] != cell_id12[:-1], axis=1)
+        cell_id12 = np.vstack([cell_id12[0], cell_id12[1:][mask]])
+        self.cell_couplings = cell_id12.astype(np.int32)
+
+    def get_cell_couple_id(self, cell_id1, cell_id2):
+        assert cell_id1 != cell_id2
+        if cell_id1 < cell_id2:
+            rev = False
+            a, b = cell_id1, cell_id2
+        else:
+            rev = True
+            a, b = cell_id2, cell_id1
+
+        K = int(self.cell_couplings[:, 1].max()) + 1
+        keys = self.cell_couplings[:, 0] * K + self.cell_couplings[:, 1]
+        target = a * K + b
+
+        idx = int(np.searchsorted(keys, target))
+
+        n_couples = self.cell_couplings.shape[0]
+        if idx < n_couples and keys[idx] == target:
+            return idx + n_couples if rev else idx
+        else:
+            raise ValueError(f"These cells are not connected {cell_id1} {cell_id2}")
+
+    def _analyze_graph_bandwidth(self):
+        edges = self.cell_couplings
+        n_nodes = edges.max() + 1
+
+        # Create a sparse symmetric matrix
+        rows, cols = edges[:, 0], edges[:, 1]
+        data = np.ones(len(rows))
+        adj = csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+        # Ensure it is symmetric (undirected graph)
+        adj = adj + adj.T
+
+        def get_bandwidth(matrix):
+            # Find indices of non-zero elements
+            r, c = matrix.nonzero()
+            if len(r) == 0:
+                return 0
+            return np.max(np.abs(r - c))
+
+        # 2. Compute Original Bandwidth
+        old_bw = get_bandwidth(adj)
+
+        # 3. Compute Reverse Cuthill-McKee Reordering
+        # perm is the new ordering of the original indices
+        perm = reverse_cuthill_mckee(adj)
+
+        # 4. Apply Reordering to get New Bandwidth
+        # We reorder rows and columns: adj[perm, :][:, perm]
+        new_adj = adj[perm, :][:, perm]
+        new_bw = get_bandwidth(new_adj)
+
+        print("old_bw", old_bw)
+        print("new_bw", new_bw)
+
+    def _compute_bc_tags(self):
         self.BCTag = np.zeros_like(self.EToV, dtype=np.int32)
         for bc_tag in self.BFaces:
             bc_id = self.bc[bc_tag]
@@ -774,16 +869,16 @@ class Mesh2D:
                 bc_ind = np.zeros_like(self.EToV, dtype=bool)
                 face_list = self.BFaces[bc_tag]
                 for j in range(face_list.shape[0]):
-                    el, lf = self.__lfind(face_list[j, :])
+                    el, lf = self._lfind(face_list[j, :])
                     bc_ind[el, lf] = True
                 self.BCTag += bc_tag * bc_ind
 
-    def __compute_ghost_elements(self):
-        self.__compute_ghost_elements1()
-        self.__compute_ghost_elements2()
-        self.__compute_ghost_elements3()
+    def _compute_ghost_elements(self):
+        self._compute_ghost_elements1()
+        self._compute_ghost_elements2()
+        self._compute_ghost_elements3()
 
-    def __compute_ghost_elements_essential(self):
+    def _compute_ghost_elements_essential(self):
         xyvs = [self.VXY[self.EToV[:, i], j] for i in range(3) for j in range(2)]
         self.xv1, self.yv1, self.xv2, self.yv2, self.xv3, self.yv3 = xyvs
         self.fnx = np.vstack(
@@ -843,7 +938,7 @@ class Mesh2D:
                 + np.outer(self.s1, xyvs[2 * PERM[j] + 1][ids[j]])
             )
 
-    def __compute_ghost_elements1(self):
+    def _compute_ghost_elements1(self):
         self.vcx = [
             self.xv1 + self.xv2 + self.xv3,
             self.xv1 + self.xv2 + self.xvn1,
@@ -858,7 +953,7 @@ class Mesh2D:
         ]
         self.vcx, self.vcy = np.vstack(self.vcx) / 3, np.vstack(self.vcy) / 3
 
-    def __compute_ghost_elements2(self):
+    def _compute_ghost_elements2(self):
         self.patch_alphas = np.empty((3, 3, self.K))
         self.patch_alphasA = np.empty((3, 2, 2, self.K))
         self.patch_alphasB = np.empty((3, 2, self.K))
@@ -902,7 +997,7 @@ class Mesh2D:
                 self.patch_alphasA[j, :, :, i] = A
                 self.patch_alphasB[j, :, i] = b
 
-    def __compute_ghost_elements3(self):
+    def _compute_ghost_elements3(self):
         self.MMAP = np.empty((self.Np, 3), dtype=np.int32)
         xx, yy = np.array([-1, 1, -1]), np.array([-1, -1, 1])
         vindm = np.array([[0, 2, 1], [1, 0, 2], [2, 1, 0]])
@@ -923,13 +1018,13 @@ class Mesh2D:
             idM, idP = np.where(np.sqrt(np.abs(D)) < MESH_TOL)
             self.MMAP[:, i] = idM[np.argsort(idP)]
 
-    def __compute_face_maps(self):
-        self.__compute_face_maps1()
-        self.__compute_face_maps2()
-        self.__compute_face_maps3()
-        self.__compute_face_maps4()
+    def _compute_face_maps(self):
+        self._compute_face_maps1()
+        self._compute_face_maps2()
+        self._compute_face_maps3()
+        self._compute_face_maps4()
 
-    def __compute_face_maps1(self):
+    def _compute_face_maps1(self):
         self.nodeids = np.arange(self.K * self.Np).reshape((self.Np, self.K), order="F")
         self.gnodeids = np.arange(self.KG * self.Np).reshape(
             (self.Np, self.KG), order="F"
@@ -945,12 +1040,12 @@ class Mesh2D:
         )
         self.vmapB = np.empty((self.Nfp, self.KG), dtype=np.int32)
 
-    def __compute_face_maps2(self):
+    def _compute_face_maps2(self):
         for k1 in range(self.K):
             for f1 in range(3):
                 self.vmapM[:, f1, k1] = self.nodeids[self.Fmask[:, f1], k1]
 
-    def __compute_face_maps3(self):
+    def _compute_face_maps3(self):
         flat_x = self.x.reshape((-1,), order="F")
         flat_y = self.y.reshape((-1,), order="F")
         flat_xG = self.xG.reshape((-1,), order="F")
@@ -994,31 +1089,31 @@ class Mesh2D:
                 self.vmapP.reshape((-1,), order="F")
                 == self.vmapM.reshape((-1,), order="F")
             )[0]
-            print(np.all(np.sort(mapB) == np.sort(self.mapB.flatten())))
+            assert np.all(np.sort(mapB) == np.sort(self.mapB.flatten()))
             vmapB = self.vmapM.flatten(order="F")[mapB]
-            print(np.all(np.sort(vmapB) == np.sort(self.vmapB.flatten())))
+            assert np.all(np.sort(vmapB) == np.sort(self.vmapB.flatten()))
             # TODO: BUG: same elements but different order, why?
             # assert np.all(mapB == self.mapB.reshape((-1,), order="F"))
             # assert np.all(vmapB == self.vmapB.flatten(order="F"))
 
-    def __compute_face_maps4(self):
+    def _compute_face_maps4(self):
         self.vmapP = self.vmapP.reshape((-1), order="F")
         self.vmapM = self.vmapM.reshape((-1), order="F")
         self.mapP = self.mapP.reshape((-1), order="F")
         self.vmapM = self.vmapM.reshape((self.Nfp * 3, self.K), order="F")
         self.vmapP = self.vmapP.reshape((self.Nfp * 3, self.K), order="F")
 
-    def __compute_weak_operators(self):
+    def _compute_weak_operators(self):
         self.Vr, self.Vs = grad_vandermonde2D(self.N, self.r, self.s)
         denT = np.matmul(self.V, self.V.T).T
         self.Drw = np.linalg.solve(denT, np.matmul(self.V, self.Vr.T).T).T
         self.Dsw = np.linalg.solve(denT, np.matmul(self.V, self.Vs.T).T).T
 
-    def __compute_interpolation_matrix(self):
-        self.__compute_interpolation_matrix1()
-        self.__compute_interpolation_matrix2()
+    def _compute_interpolation_matrix(self):
+        self._compute_interpolation_matrix1()
+        self._compute_interpolation_matrix2()
 
-    def __compute_interpolation_matrix1(self):
+    def _compute_interpolation_matrix1(self):
         ij, idx = np.ones((self.VX.size * 6, 2), dtype=np.int32), 0
 
         self.EToV_flat = self.EToV.ravel()
@@ -1051,7 +1146,7 @@ class Mesh2D:
 
             self.VToE = jsparse.BCOO((data, indices), shape=self.VToE.shape)
 
-    def __compute_interpolation_matrix2(self):
+    def _compute_interpolation_matrix2(self):
         coov = np.stack(
             [
                 self.VX[self.EToV_flat],
@@ -1108,7 +1203,7 @@ class Mesh2D:
                 (data, indices), shape=self.interp_matrix.shape
             )
 
-    def __compute_essential_bc(self):
+    def _compute_essential_bc(self):
         self.bc_essential = {
             k: self.bc[k] for k in self.bc if self.bc[k] != BC.Periodic
         }
@@ -1154,7 +1249,7 @@ class Mesh2D:
         mesh_lc = LineCollection(
             all_edges, colors="lightgray", linewidths=0.5, alpha=1.0
         )
-        ax.add_collection(mesh_lc) 
+        ax.add_collection(mesh_lc)
 
         # Plot Boundary Edges by Tag
         color_cycle = list(mcolors.TABLEAU_COLORS.values())

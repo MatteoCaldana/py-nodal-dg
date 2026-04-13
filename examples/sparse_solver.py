@@ -112,7 +112,16 @@ if __name__ == "__main__":
     raw_data = scipy.io.loadmat(DIR + "INS2D_2.mat")
     mat = raw_data["PRsystemC"].T.tocsr().copy()
 
-    run_matvec(mat)
+    matmat = mat @ mat.T
+    d_jax, c_jax, diag_jax, max_bw = prepare(mat)
+    print(max_bw)
+
+    # TODO: - test matvec with bcoo vs mine on cpu and GPU
+    #       - test [p]cg
+    #       - add preconditioner
+
+
+    # run_matvec(mat)
 
     rhs = np.ones(mat.shape[0])
 
@@ -122,20 +131,46 @@ if __name__ == "__main__":
     toc = time.perf_counter()
     print(f"{'SciPy tri solve':15} | Avg Time: {((toc-tic)/100)*1000:10.4f} ms")
 
-    d_jax, c_jax, diag_jax, max_bw = prepare(mat)
-    xjx = jax_sp_fw_sub(d_jax, c_jax, diag_jax, jnp.asarray(rhs)).block_until_ready()
 
-    print(np.max(np.abs(xsp - xjx)))
+    # # richardson
+    # x = np.zeros_like(rhs)
+    # eig = mat.diagonal()
+    # omega = 2 / (eig.min() + eig.max())
+    # for step in range(10000):
+    #     x = x + omega * (rhs - mat @ x)
+    #     err = np.linalg.norm(x - xsp)
+    #     print(err)
+    #     if err < 1e-8:
+    #         print(f"Richardson converged at {step}")
+    #         break
+    
+    # # jacobi
+    # x = np.zeros_like(rhs)
+    # D = mat.diagonal() 
+    # omega = 1.0
+    # for step in range(100000):
+    #     residual = rhs - mat @ x
+    #     x = x + omega * (residual / D)
+    #     err = np.linalg.norm(residual)
+    #     print(err)
+    #     if err < 1e-8:
+    #         print(f"Jacobi converged at {step}")
+    #         break
 
-    iterations = 100
-    tic = time.perf_counter()
-    for _ in range(iterations):
-        res = jax_sp_fw_sub(
-            d_jax, c_jax, diag_jax, jnp.asarray(rhs)
-        ).block_until_ready()
-    toc = time.perf_counter()
+    # d_jax, c_jax, diag_jax, max_bw = prepare(mat)
+    # xjx = jax_sp_fw_sub(d_jax, c_jax, diag_jax, jnp.asarray(rhs)).block_until_ready()
 
-    avg_ms = ((toc - tic) / iterations) * 1000
-    print(f"{'jax tri solve':15} | Avg Time: {avg_ms:10.4f} ms")
+    # print(np.max(np.abs(xsp - xjx)))
+
+    # iterations = 100
+    # tic = time.perf_counter()
+    # for _ in range(iterations):
+    #     res = jax_sp_fw_sub(
+    #         d_jax, c_jax, diag_jax, jnp.asarray(rhs)
+    #     ).block_until_ready()
+    # toc = time.perf_counter()
+
+    # avg_ms = ((toc - tic) / iterations) * 1000
+    # print(f"{'jax tri solve':15} | Avg Time: {avg_ms:10.4f} ms")
 
 

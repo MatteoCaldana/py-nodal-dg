@@ -3,6 +3,7 @@ from enum import IntEnum
 
 
 class BC(IntEnum):
+    NONE = 0
     In = 1
     Out = 2
     Slip = 3
@@ -12,4 +13,4 @@ class BC(IntEnum):
     Periodic = 7
     Wall = 8
     Cyl = 9
-    Neuman = 10
+    Neumann = 10

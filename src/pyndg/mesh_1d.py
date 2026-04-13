@@ -5,7 +5,6 @@ from scipy.special import gamma
 from . import backend as bkd
 
 from .utils import TOL
-from .scalar_param_1d import ScalarParam1D
 
 
 def generate_mesh_1d(xmin, xmax, K, mesh_per):
@@ -150,7 +149,6 @@ def grad_jacobiP(r, alpha, beta, N):
 
 class Mesh1D:
     def __init__(self, params):
-        # assert isinstance(params, ScalarParam1D)
         self.N = params.N
         self.N2 = np.array(self.N**2, dtype=np.float64)
         self.K = params.K
@@ -192,60 +190,14 @@ class Mesh1D:
             self.VtoE[1, j] = (j + 1) * self.Np
 
         # map Fortran flattening to C flattening for x
-        self.mapFtoC = np.arange(self.x.size).reshape(self.x.shape).flatten(order="F")
+        mapFtoC = np.arange(self.x.size).reshape(self.x.shape).flatten(order="F")
         # map C flattening to Fortran flattening for VtoE
-        self.mapCtoF = (
+        mapCtoF = (
             np.arange(self.VtoE.size).reshape(self.VtoE.shape, order="F").flatten()
         )
         # VtoE with 0-based indexing and C flattening order
-        self.VtoE0 = self.mapFtoC[(self.VtoE.astype(np.int64) - 1).flatten(order="F")]
-        self.VtoE0 = self.VtoE0[self.mapCtoF].astype(np.int64)
+        self.VtoE0 = mapFtoC[(self.VtoE.astype(np.int64) - 1).flatten(order="F")]
+        self.VtoE0 = self.VtoE0[mapCtoF].astype(np.int64)
 
         for field in self.__dict__.keys():
             self.__dict__[field] = bkd.to_const(self.__dict__[field])
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    from scipy.io import loadmat
-
-    from physic_model import Advection1D
-    from viscosity_model import EV1D
-    from time_integrator import SSP3
-    from bc_1d import BC
-    from test_matlab_1d import test_fields
-
-    def test_mesh_perturbation(p):
-        Nv, VX, hK = generate_mesh_1d(0, 1, 10, p)
-        plt.plot(VX, np.zeros_like(VX), marker="o")
-
-    def test_mesh(N, K):
-        p = ScalarParam1D(
-            model=Advection1D(),
-            name=f"Test_N{N}_K{K}",
-            N=N,
-            K=K,
-            u_IC=lambda x: x,
-            bnd=(0.0, 1.0),
-            mesh_pert=0.0,
-            bc=((BC.Periodic, 0.0), (BC.Periodic, 0.0)),
-            final_time=0.2,
-            cfl=0.1,
-            time_integrator=SSP3(),
-            viscosity_model=EV1D(c_E=1.0, c_max=0.5),
-        )
-        mesh = Mesh1D(p)
-        test_data = loadmat(f"test_data/mesh_1d/mesh_N{N}_K{K}.mat")
-        test_fields(mesh, test_data)
-
-    def test_all_mesh():
-        for N in [1, 2, 3, 4]:
-            for K in [1, 2, 3, 10, 16]:
-                test_mesh(N, K)
-        print("-----------------------------------")
-        print("All mesh tests PASSED")
-        print("-----------------------------------")
-
-    assert bkd.BACKEND == bkd.NUMPY
-    test_mesh_perturbation(0.5)
-    test_all_mesh()
