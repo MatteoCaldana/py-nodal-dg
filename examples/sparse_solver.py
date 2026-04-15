@@ -1,5 +1,7 @@
 import jax
 import jax.numpy as jnp
+import jax.experimental.sparse as jsparse
+
 import numpy as np
 
 import time
@@ -43,7 +45,7 @@ def prepare(sparse_csr):
 
 
 @jax.jit
-def matvec(data, cols, x):
+def matvec_v0(data, cols, x):
     x_padded = jnp.concatenate([x, jnp.zeros((1,), dtype=x.dtype)])
 
     def row_dot(row_data, row_cols):
@@ -51,6 +53,24 @@ def matvec(data, cols, x):
 
     return jax.vmap(row_dot)(data, cols)
 
+@jax.jit
+def matvec_v1(data, cols, x):
+    x_padded = jnp.concatenate([x, jnp.zeros((1,), dtype=x.dtype)])
+    return jax.vmap(jnp.dot)(data, x_padded[cols])
+
+@jax.jit
+def matvec_v2(data, cols, x):
+    x_padded = jnp.concatenate([x, jnp.zeros((1,), dtype=x.dtype)])
+    return jnp.sum(data * x_padded[cols], axis=1)
+
+@jax.jit
+def matvec_v3(data, cols, x):
+    x_padded = jnp.concatenate([x, jnp.zeros((1,), dtype=x.dtype)])
+    return jnp.einsum('ij,ij->i', data, x_padded[cols])
+
+@jax.jit
+def matvec_classic(mat, x):
+    return mat @ x
 
 def run_benchmark(name, fn, *args, iterations=100):
     # Warmup: Force JIT compilation before timing
@@ -67,10 +87,13 @@ def run_benchmark(name, fn, *args, iterations=100):
 
 
 def run_matvec(mat):
-    x_np = np.random.randn(mat.shape[1]).astype(np.float32)
+    x_np = np.random.randn(mat.shape[1]).astype(np.float64)
     x_jax = jnp.array(x_np)
 
     d_jax, c_jax, diag_jax, max_bw = prepare(mat)
+
+    bcoo_mat = jsparse.BCOO.from_scipy_sparse(mat, index_dtype=jnp.int32).astype(jnp.float64)
+    bcsr_mat = jsparse.BCSR.from_scipy_sparse(mat, index_dtype=jnp.int32)
 
     print(f"Matrix Rows: {mat.shape[0]} | Max Bandwidth: {max_bw}")
     print("-" * 50)
@@ -82,12 +105,23 @@ def run_matvec(mat):
     toc = time.perf_counter()
     print(f"{'SciPy CSR':15} | Avg Time: {((toc-tic)/100)*1000:10.4f} ms")
 
-    # jax bench
-    res_v1 = run_benchmark("JAX Matvec V1", matvec, d_jax, c_jax, x_jax)
-
+    res_v1 = run_benchmark("JAX Matvec V0", matvec_v0, d_jax, c_jax, x_jax)
     np.testing.assert_allclose(res_sp, np.array(res_v1), atol=1e-10)
+    res_v1 = run_benchmark("JAX Matvec V1", matvec_v1, d_jax, c_jax, x_jax)
+    np.testing.assert_allclose(res_sp, np.array(res_v1), atol=1e-10)
+    res_v1 = run_benchmark("JAX Matvec V2", matvec_v2, d_jax, c_jax, x_jax)
+    np.testing.assert_allclose(res_sp, np.array(res_v1), atol=1e-10)
+    res_v1 = run_benchmark("JAX Matvec V3", matvec_v3, d_jax, c_jax, x_jax)
+    np.testing.assert_allclose(res_sp, np.array(res_v1), atol=1e-10)
+    res_bcoo = run_benchmark("JAX BCOO", matvec_classic, bcoo_mat, x_jax)
+    np.testing.assert_allclose(res_sp, np.array(res_bcoo), atol=1e-10)
+    res_bcoo = run_benchmark("JAX BCSR", matvec_classic, bcsr_mat, x_jax)
+    np.testing.assert_allclose(res_sp, np.array(res_bcoo), atol=1e-10)
+
     print("-" * 50)
     print("Numerical validation passed!")
+    print("-" * 50)
+    print("-" * 50)
 
 
 @jax.jit
@@ -114,14 +148,14 @@ if __name__ == "__main__":
 
     matmat = mat @ mat.T
     d_jax, c_jax, diag_jax, max_bw = prepare(mat)
-    print(max_bw)
+    print("size:", mat.shape, "bw:", max_bw)
 
     # TODO: - test matvec with bcoo vs mine on cpu and GPU
     #       - test [p]cg
     #       - add preconditioner
 
 
-    # run_matvec(mat)
+    run_matvec(mat)
 
     rhs = np.ones(mat.shape[0])
 
@@ -131,46 +165,20 @@ if __name__ == "__main__":
     toc = time.perf_counter()
     print(f"{'SciPy tri solve':15} | Avg Time: {((toc-tic)/100)*1000:10.4f} ms")
 
+    d_jax, c_jax, diag_jax, max_bw = prepare(mat)
+    xjx = jax_sp_fw_sub(d_jax, c_jax, diag_jax, jnp.asarray(rhs)).block_until_ready()
 
-    # # richardson
-    # x = np.zeros_like(rhs)
-    # eig = mat.diagonal()
-    # omega = 2 / (eig.min() + eig.max())
-    # for step in range(10000):
-    #     x = x + omega * (rhs - mat @ x)
-    #     err = np.linalg.norm(x - xsp)
-    #     print(err)
-    #     if err < 1e-8:
-    #         print(f"Richardson converged at {step}")
-    #         break
-    
-    # # jacobi
-    # x = np.zeros_like(rhs)
-    # D = mat.diagonal() 
-    # omega = 1.0
-    # for step in range(100000):
-    #     residual = rhs - mat @ x
-    #     x = x + omega * (residual / D)
-    #     err = np.linalg.norm(residual)
-    #     print(err)
-    #     if err < 1e-8:
-    #         print(f"Jacobi converged at {step}")
-    #         break
+    iterations = 100
+    tic = time.perf_counter()
+    for _ in range(iterations):
+        res = jax_sp_fw_sub(
+            d_jax, c_jax, diag_jax, jnp.asarray(rhs)
+        ).block_until_ready()
+    toc = time.perf_counter()
 
-    # d_jax, c_jax, diag_jax, max_bw = prepare(mat)
-    # xjx = jax_sp_fw_sub(d_jax, c_jax, diag_jax, jnp.asarray(rhs)).block_until_ready()
+    avg_ms = ((toc - tic) / iterations) * 1000
+    print(f"{'jax tri solve':15} | Avg Time: {avg_ms:10.4f} ms")
+    print("Numerical validation jax_sp_fw_sub: ", np.max(np.abs(xsp - xjx)) < 1e-10)
 
-    # print(np.max(np.abs(xsp - xjx)))
-
-    # iterations = 100
-    # tic = time.perf_counter()
-    # for _ in range(iterations):
-    #     res = jax_sp_fw_sub(
-    #         d_jax, c_jax, diag_jax, jnp.asarray(rhs)
-    #     ).block_until_ready()
-    # toc = time.perf_counter()
-
-    # avg_ms = ((toc - tic) / iterations) * 1000
-    # print(f"{'jax tri solve':15} | Avg Time: {avg_ms:10.4f} ms")
 
 

@@ -223,7 +223,7 @@ def run_benchmark(name, func, args, iters=100):
 # - pGMG
 
 if __name__ == "__main__":
-    N = 8
+    N = 5
 
     data = scipy.io.loadmat(PATH + f"Poisson2D_N{N}.mat")
 
@@ -277,22 +277,22 @@ if __name__ == "__main__":
     for _ in range(100):
         problem.stiff_mat @ x
     t1 = time.time()
-    print(f"Elapsed {(t1 - t0) * 1000:.1f}")
+    print(f"Scipy COO matvec     {(t1 - t0) * 1000:.1f}")
 
     mat = problem.stiff_mat.tocsr()
     t0 = time.time()
     for _ in range(100):
         mat @ x
     t1 = time.time()
-    print(f"Elapsed {(t1 - t0) * 1000:.1f}")
+    print(f"Scipy CSR matvec     {(t1 - t0) * 1000:.1f}")
 
     t0 = time.time()
     for _ in range(100):
         problem.matvec(x)
     t1 = time.time()
-    print(f"Elapsed {(t1 - t0) * 1000:.1f}")
+    print(f"Block numpy matvec   {(t1 - t0) * 1000:.1f}")
 
 
-    run_benchmark("Vectorized/At", matvec_vmap, (x, problem.ij, problem.stiff, problem.mesh.Np))
-    run_benchmark("Segment Sum",   matvec_segment, (x, problem.ij, problem.stiff, problem.mesh.Np))
-    run_benchmark("Fori Loop",     matvec_fori, (x, problem.ij, problem.stiff, problem.mesh.Np))
+    run_benchmark("JAX Vmap", matvec_vmap, (x, problem.ij, problem.stiff, problem.mesh.Np))
+    run_benchmark("JAX Segment Sum",   matvec_segment, (x, problem.ij, problem.stiff, problem.mesh.Np))
+    run_benchmark("JAX Fori Loop",     matvec_fori, (x, problem.ij, problem.stiff, problem.mesh.Np))

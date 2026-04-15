@@ -194,6 +194,9 @@ def Grad2D(mesh, u):
     return ux, uy
 
 
+system_solve_time = 0
+system_solve_cnt = 0
+
 def ins2d_advection(mesh, state):
     # 1. Evaluate flux vectors
     fxUx = state.Ux * state.Ux
@@ -305,8 +308,13 @@ def ins2d_pressure(mesh, state):
     PRrhs_flat = PRrhs_flat[state.PRperm]
 
     # 7. Pressure Solve (Assuming PRperm, PRsystemCT, PRsystemC are pre-computed)
+    global system_solve_time, system_solve_cnt
+    t0 = time.perf_counter()
     tmp = spsolve_triangular(state.PRsystemC.T, PRrhs_flat, lower=True)
     PR_sol = spsolve_triangular(state.PRsystemC, tmp, lower=False)
+    t1 = time.perf_counter()
+    system_solve_time += t1 - t0
+    system_solve_cnt += 1
 
     # Reconstruct PR array using the permutation
     PR = np.empty_like(PR_sol)
@@ -341,11 +349,16 @@ def ins2d_viscous(mesh, state):
 
     # Backsolve twice (Assuming VELsystemCT and VELsystemC are the factored matrices)
     Uxrhs_flat = Uxrhs_flat[state.VELperm]
+    Uyrhs_flat = Uyrhs_flat[state.VELperm]
+    global system_solve_time, system_solve_cnt
+    t0 = time.perf_counter()
     tmp_x = spsolve_triangular(state.VELsystemC.T, Uxrhs_flat, lower=True)
     Ux_sol = spsolve_triangular(state.VELsystemC, tmp_x, lower=False)
-    Uyrhs_flat = Uyrhs_flat[state.VELperm]
     tmp_y = spsolve_triangular(state.VELsystemC.T, Uyrhs_flat, lower=True)
     Uy_sol = spsolve_triangular(state.VELsystemC, tmp_y, lower=False)
+    t1 = time.perf_counter()
+    system_solve_time += t1 - t0
+    system_solve_cnt += 2
 
     # Update the state variables
     tmp_Ux = np.empty_like(Ux_sol)
@@ -386,6 +399,14 @@ def compare(state, state_ref):
     print("===============================")
 
 
+# TODO:
+# - build Poisson matrix in python
+# - GPU scalable solver ideas, to test **scaling** for different N:
+# --- richardson on Cholesky + SPAI 
+# --- CG + SPAI [separate and together Chol factors]
+# --- pGMG
+
+
 if __name__ == "__main__":
     import cProfile
     import pstats
@@ -393,24 +414,35 @@ if __name__ == "__main__":
     DIR = "/home/matteo/Documents/nodal-dg/Codes1.1/"
 
     state, mesh = load(DIR + "INS2D_2.mat")
-    do_check = True
+    do_check = False
+    do_profile = False
+
+    run_time = 0
 
     def run():
-        t0 = time.time()  # 6.5[s] for 1k steps
+        # N = 5, 0.60[s] for 100 steps, 0.45 for backslash -> 1.5ms / system
+        # N = 7, 1.47[s] for 100 steps, 1.21 for backslash -> 4.0ms / system
+        # N = 8, 2.00[s] for 100 steps, 1.75 for backslash -> 6.0ms / system
+        global run_time
+        t0 = time.time()
         for step in range(2, 20):
+            t0 = time.perf_counter()
             ins2d_step(mesh, state)
+            run_time += time.perf_counter() - t0
             if do_check:
                 state_ref, _ = load(DIR + f"INS2D_{step + 1}.mat")
                 compare(state, state_ref)
-        dt = time.time() - t0
-        print(f"Elapsed {dt:.4f}")
 
-    if do_check:
-        run()
+    if do_profile:
+        with cProfile.Profile() as pr:
+            run()
+
+        stats = pstats.Stats(pr)
+        stats.sort_stats("cumulative").print_stats()
     else:
         run()
-        # with cProfile.Profile() as pr:
-        #     run()
 
-        # stats = pstats.Stats(pr)
-        # stats.sort_stats("cumulative").print_stats()
+
+    avg_solve_time = system_solve_time / system_solve_cnt
+    print(f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)")
+    print(f"Run time: {run_time:.2f}")
