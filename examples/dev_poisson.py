@@ -19,6 +19,7 @@ import time
 import jax
 import jax.numpy as jnp
 from jax import lax
+jax.config.update("jax_enable_x64", True)
 
 np.set_printoptions(threshold=np.inf)
 np.set_printoptions(linewidth=np.inf)
@@ -175,7 +176,6 @@ class Poisson2D:
         return y
 
 
-@jax.jit(static_argnums=(3,))
 def matvec_vmap(x, ij, stiff, Np):
     row_indices, col_indices = ij[:, 0], ij[:, 1]
     x_reshaped = x.reshape(-1, Np)
@@ -183,19 +183,21 @@ def matvec_vmap(x, ij, stiff, Np):
     y_reshaped = jnp.zeros_like(x_reshaped).at[row_indices].add(contributions)
     return y_reshaped.flatten()
 
-@jax.jit(static_argnums=(3,))
+
 def matvec_segment(x, ij, stiff, Np):
     row_indices, col_indices = ij[:, 0], ij[:, 1]
     x_reshaped = x.reshape(-1, Np)
     contributions = jax.vmap(lambda m, v: m @ v)(stiff, x_reshaped[col_indices])
-    y_reshaped = jax.ops.segment_sum(contributions, row_indices, num_segments=x_reshaped.shape[0])
+    y_reshaped = jax.ops.segment_sum(
+        contributions, row_indices, num_segments=x_reshaped.shape[0]
+    )
     return y_reshaped.flatten()
 
-@jax.jit(static_argnums=(3,))
+
 def matvec_fori(x, ij, stiff, Np):
     x_reshaped = x.reshape(-1, Np)
     y_init = jnp.zeros_like(x_reshaped)
-    
+
     def body_fun(k, y_acc):
         i, j = ij[k, 0], ij[k, 1]
         return y_acc.at[i].add(stiff[k] @ x_reshaped[j])
@@ -207,13 +209,14 @@ def matvec_fori(x, ij, stiff, Np):
 def run_benchmark(name, func, args, iters=100):
     # Warmup (compilation happens here)
     _ = func(*args).block_until_ready()
-    
+
     t0 = time.time()
     for _ in range(iters):
-        res = func(*args).block_until_ready() # Crucial for JAX timing!
+        res = func(*args).block_until_ready()  # Crucial for JAX timing!
     t1 = time.time()
-    
+
     print(f"{name:15} | Elapsed: {(t1 - t0) * 1000:8.3f} ms/iter")
+
 
 # TODO:
 # - check convergence error
@@ -223,7 +226,7 @@ def run_benchmark(name, func, args, iters=100):
 # - pGMG
 
 if __name__ == "__main__":
-    N = 5
+    N = 10
 
     data = scipy.io.loadmat(PATH + f"Poisson2D_N{N}.mat")
 
@@ -292,7 +295,17 @@ if __name__ == "__main__":
     t1 = time.time()
     print(f"Block numpy matvec   {(t1 - t0) * 1000:.1f}")
 
+    matvec_vmap_ = jax.jit(lambda a, b, c: matvec_vmap(a, b, c, mesh.Np))
+    matvec_segment_ = jax.jit(lambda a, b, c: matvec_segment(a, b, c, mesh.Np))
+    matvec_fori_ = jax.jit(lambda a, b, c: matvec_fori(a, b, c, mesh.Np))
 
-    run_benchmark("JAX Vmap", matvec_vmap, (x, problem.ij, problem.stiff, problem.mesh.Np))
-    run_benchmark("JAX Segment Sum",   matvec_segment, (x, problem.ij, problem.stiff, problem.mesh.Np))
-    run_benchmark("JAX Fori Loop",     matvec_fori, (x, problem.ij, problem.stiff, problem.mesh.Np))
+    x = jnp.array(x)
+    ij = jnp.array(problem.ij)
+    stiff = jnp.array(problem.stiff)
+    run_benchmark("JAX Vmap", matvec_vmap_, (x, ij, stiff))
+    run_benchmark(
+        "JAX Segment Sum",
+        matvec_segment_,
+        (x, ij, stiff),
+    )
+    run_benchmark("JAX Fori Loop", matvec_fori_, (x, ij, stiff))

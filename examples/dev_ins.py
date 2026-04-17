@@ -10,7 +10,6 @@ class State:
         self.time = data["time"].item()
         self.dt = data["dt"].item()
         self.tstep = data["tstep"].item()
-        self.nu = data["nu"].item()
 
         # State Vectors
         self.Ux = data["Ux"]
@@ -24,6 +23,11 @@ class State:
         self.NUx = data["NUx"]
         self.NUy = data["NUy"]
         self.dpdn = data["dpdn"]
+
+
+class StaticState:
+    def __init__(self, data):
+        self.nu = data["nu"].item()
 
         # Boundary / Reference Data
         self.refbcUx = data["refbcUx"]
@@ -137,18 +141,18 @@ class Mesh:
                 setattr(self, var + "C", mapC)
 
 
-def ins2d_step(mesh, state):
-    temporal_scaling(state)
-    ins2d_advection(mesh, state)
-    ins2d_pressure(mesh, state)
-    ins2d_viscous(mesh, state)
+def ins2d_step(mesh, static_state, state):
+    temporal_scaling(static_state, state)
+    ins2d_advection(mesh, state, static_state)
+    ins2d_pressure(mesh, state, static_state)
+    ins2d_viscous(mesh, state, static_state)
     ins2d_render(mesh, state)
     ins2d_lift_drag(mesh, state)
     state.time = state.tstep * state.dt
     state.tstep += 1
 
 
-def temporal_scaling(state):
+def temporal_scaling(static_state, state):
     time = state.time
     dt = state.dt
 
@@ -160,13 +164,13 @@ def temporal_scaling(state):
     tpfac2 = (np.pi / 8) * np.cos(np.pi * time / 8)
 
     # Boundary condition calculations
-    state.bcUx = tfac * state.refbcUx
-    state.rhsbcUx = tfac1 * state.refrhsbcUx
-    state.bcUy = tfac * state.refbcUy
-    state.rhsbcUy = tfac1 * state.refrhsbcUy
-    state.bcPR = tpfac1 * state.refbcPR
-    state.rhsbcPR = tpfac2 * state.refrhsbcPR
-    state.bcdUndt = tpfac * state.refbcdUndt
+    state.bcUx = tfac * static_state.refbcUx
+    state.rhsbcUx = tfac1 * static_state.refrhsbcUx
+    state.bcUy = tfac * static_state.refbcUy
+    state.rhsbcUy = tfac1 * static_state.refrhsbcUy
+    state.bcPR = tpfac1 * static_state.refbcPR
+    state.rhsbcPR = tpfac2 * static_state.refrhsbcPR
+    state.bcdUndt = tpfac * static_state.refbcdUndt
 
 
 def Div2D(mesh, u, v):
@@ -197,7 +201,8 @@ def Grad2D(mesh, u):
 system_solve_time = 0
 system_solve_cnt = 0
 
-def ins2d_advection(mesh, state):
+
+def ins2d_advection(mesh, state, ss):
     # 1. Evaluate flux vectors
     fxUx = state.Ux * state.Ux
     fyUx = state.Ux * state.Uy
@@ -262,24 +267,24 @@ def ins2d_advection(mesh, state):
 
     # 11. Compute intermediate velocity (U~, V~)
     state.UxT = (
-        (state.a0 * state.Ux + state.a1 * state.Uxold)
-        - state.dt * (state.b0 * state.NUx + state.b1 * NUxold)
-    ) / state.g0
+        (ss.a0 * state.Ux + ss.a1 * state.Uxold)
+        - state.dt * (ss.b0 * state.NUx + ss.b1 * NUxold)
+    ) / ss.g0
     state.UyT = (
-        (state.a0 * state.Uy + state.a1 * state.Uyold)
-        - state.dt * (state.b0 * state.NUy + state.b1 * NUyold)
-    ) / state.g0
+        (ss.a0 * state.Uy + ss.a1 * state.Uyold)
+        - state.dt * (ss.b0 * state.NUy + ss.b1 * NUyold)
+    ) / ss.g0
 
 
-def ins2d_pressure(mesh, state):
+def ins2d_pressure(mesh, state, ss):
     DivUT = Div2D(mesh, state.UxT, state.UyT)
 
     # 2. Compute dp/dn components
     CurlU = Curl2D(mesh, state.Ux, state.Uy)
     dCurlUdx, dCurlUdy = Grad2D(mesh, CurlU)
 
-    res1 = -state.NUx - state.nu * dCurlUdy
-    res2 = -state.NUy + state.nu * dCurlUdx
+    res1 = -state.NUx - ss.nu * dCurlUdy
+    res2 = -state.NUy + ss.nu * dCurlUdx
 
     # 3. Save old and compute new dp/dn
     dpdnold = state.dpdn.copy()
@@ -299,48 +304,48 @@ def ins2d_pressure(mesh, state):
     state.dpdn -= state.bcdUndt
 
     # 5. Evaluate RHS for Pressure Poisson Equation
-    term_vol = mesh.J * (-DivUT * state.g0 / state.dt)
-    term_sur = mesh.LIFT @ (mesh.sJ * (state.b0 * state.dpdn + state.b1 * dpdnold))
+    term_vol = mesh.J * (-DivUT * ss.g0 / state.dt)
+    term_sur = mesh.LIFT @ (mesh.sJ * (ss.b0 * state.dpdn + ss.b1 * dpdnold))
     PRrhs = mesh.MassMatrix @ (term_vol + term_sur)
 
     # 6. Add Dirichlet boundary forcing
     PRrhs_flat = PRrhs.ravel(order="F") + state.rhsbcPR.ravel(order="F")
-    PRrhs_flat = PRrhs_flat[state.PRperm]
+    PRrhs_flat = PRrhs_flat[ss.PRperm]
 
     # 7. Pressure Solve (Assuming PRperm, PRsystemCT, PRsystemC are pre-computed)
     global system_solve_time, system_solve_cnt
     t0 = time.perf_counter()
-    tmp = spsolve_triangular(state.PRsystemC.T, PRrhs_flat, lower=True)
-    PR_sol = spsolve_triangular(state.PRsystemC, tmp, lower=False)
+    tmp = spsolve_triangular(ss.PRsystemC.T, PRrhs_flat, lower=True)
+    PR_sol = spsolve_triangular(ss.PRsystemC, tmp, lower=False)
     t1 = time.perf_counter()
     system_solve_time += t1 - t0
     system_solve_cnt += 1
 
     # Reconstruct PR array using the permutation
     PR = np.empty_like(PR_sol)
-    PR[state.PRperm] = PR_sol
+    PR[ss.PRperm] = PR_sol
     PR = PR.reshape((mesh.Np, mesh.K), order="F")
 
     # 8. Compute (U~~, V~~) = (U~, V~) - dt*grad PR
     dPRdx, dPRdy = Grad2D(mesh, PR)
 
     # 9. Increment to (Ux~~, Uy~~)
-    state.UxTT = state.UxT - state.dt * (dPRdx) / state.g0
-    state.UyTT = state.UyT - state.dt * (dPRdy) / state.g0
+    state.UxTT = state.UxT - state.dt * (dPRdx) / ss.g0
+    state.UyTT = state.UyT - state.dt * (dPRdy) / ss.g0
 
 
-def ins2d_viscous(mesh, state):
+def ins2d_viscous(mesh, state, ss):
     J_mean = np.mean(mesh.J, axis=0)
 
     mmUxTT = J_mean * (mesh.MassMatrix @ state.UxTT)
     mmUyTT = J_mean * (mesh.MassMatrix @ state.UyTT)
 
     # 2. Formulate the full RHS for the Helmholtz system
-    Uxrhs_flat = (state.g0 * mmUxTT.ravel(order="F")) / (
-        state.nu * state.dt
+    Uxrhs_flat = (ss.g0 * mmUxTT.ravel(order="F")) / (
+        ss.nu * state.dt
     ) + state.rhsbcUx.ravel(order="F")
-    Uyrhs_flat = (state.g0 * mmUyTT.ravel(order="F")) / (
-        state.nu * state.dt
+    Uyrhs_flat = (ss.g0 * mmUyTT.ravel(order="F")) / (
+        ss.nu * state.dt
     ) + state.rhsbcUy.ravel(order="F")
 
     # 3. Save current velocity to old variables
@@ -348,24 +353,24 @@ def ins2d_viscous(mesh, state):
     state.Uyold = state.Uy.copy()
 
     # Backsolve twice (Assuming VELsystemCT and VELsystemC are the factored matrices)
-    Uxrhs_flat = Uxrhs_flat[state.VELperm]
-    Uyrhs_flat = Uyrhs_flat[state.VELperm]
+    Uxrhs_flat = Uxrhs_flat[ss.VELperm]
+    Uyrhs_flat = Uyrhs_flat[ss.VELperm]
     global system_solve_time, system_solve_cnt
     t0 = time.perf_counter()
-    tmp_x = spsolve_triangular(state.VELsystemC.T, Uxrhs_flat, lower=True)
-    Ux_sol = spsolve_triangular(state.VELsystemC, tmp_x, lower=False)
-    tmp_y = spsolve_triangular(state.VELsystemC.T, Uyrhs_flat, lower=True)
-    Uy_sol = spsolve_triangular(state.VELsystemC, tmp_y, lower=False)
+    tmp_x = spsolve_triangular(ss.VELsystemC.T, Uxrhs_flat, lower=True)
+    Ux_sol = spsolve_triangular(ss.VELsystemC, tmp_x, lower=False)
+    tmp_y = spsolve_triangular(ss.VELsystemC.T, Uyrhs_flat, lower=True)
+    Uy_sol = spsolve_triangular(ss.VELsystemC, tmp_y, lower=False)
     t1 = time.perf_counter()
     system_solve_time += t1 - t0
     system_solve_cnt += 2
 
     # Update the state variables
     tmp_Ux = np.empty_like(Ux_sol)
-    tmp_Ux[state.VELperm] = Ux_sol
+    tmp_Ux[ss.VELperm] = Ux_sol
     state.Ux = tmp_Ux.reshape((mesh.Np, mesh.K), order="F")
     tmp_Uy = np.empty_like(Uy_sol)
-    tmp_Uy[state.VELperm] = Uy_sol
+    tmp_Uy[ss.VELperm] = Uy_sol
     state.Uy = tmp_Uy.reshape((mesh.Np, mesh.K), order="F")
 
 
@@ -377,11 +382,15 @@ def ins2d_lift_drag(mesh, state):
     pass
 
 
-def load(file_path):
+def load(file_path, load_static=False):
     data = scipy.io.loadmat(file_path)
-    state = State(data)
-    mesh = Mesh(data)
-    return state, mesh
+    if load_static:
+        static_state = StaticState(data)
+        mesh = Mesh(data)
+        return static_state, mesh
+    else:
+        state = State(data)
+        return state
 
 
 def compare(state, state_ref):
@@ -401,8 +410,9 @@ def compare(state, state_ref):
 
 # TODO:
 # - build Poisson matrix in python
+# - check matvec product timings in CRS vs COO vs Block Native vs Block Synth both CPU and GPU
 # - GPU scalable solver ideas, to test **scaling** for different N:
-# --- richardson on Cholesky + SPAI 
+# --- richardson on Cholesky + SPAI
 # --- CG + SPAI [separate and together Chol factors]
 # --- pGMG
 
@@ -413,8 +423,10 @@ if __name__ == "__main__":
 
     DIR = "/home/matteo/Documents/nodal-dg/Codes1.1/"
 
-    state, mesh = load(DIR + "INS2D_2.mat")
-    do_check = False
+    N = 10
+    static_state, mesh = load(DIR + f"INS2D_N{N}_STATIC.mat", True)
+    state = load(DIR + f"INS2D_N{N}_ts2.mat")
+    do_check = True
     do_profile = False
 
     run_time = 0
@@ -427,10 +439,10 @@ if __name__ == "__main__":
         t0 = time.time()
         for step in range(2, 20):
             t0 = time.perf_counter()
-            ins2d_step(mesh, state)
+            ins2d_step(mesh, static_state, state)
             run_time += time.perf_counter() - t0
             if do_check:
-                state_ref, _ = load(DIR + f"INS2D_{step + 1}.mat")
+                state_ref = load(DIR + f"INS2D_N{N}_ts{step + 1}.mat")
                 compare(state, state_ref)
 
     if do_profile:
@@ -442,7 +454,8 @@ if __name__ == "__main__":
     else:
         run()
 
-
     avg_solve_time = system_solve_time / system_solve_cnt
-    print(f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)")
+    print(
+        f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)"
+    )
     print(f"Run time: {run_time:.2f}")

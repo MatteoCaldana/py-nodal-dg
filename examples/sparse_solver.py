@@ -144,6 +144,7 @@ def jax_sp_fw_sub(lower_vals, row_cols, diag_vals, b):
 if __name__ == "__main__":
     DIR = "/home/matteo/Documents/nodal-dg/Codes1.1/"
     raw_data = scipy.io.loadmat(DIR + "INS2D_2.mat")
+    print(raw_data["N"])
     mat = raw_data["PRsystemC"].T.tocsr().copy()
 
     matmat = mat @ mat.T
