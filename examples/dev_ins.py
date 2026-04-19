@@ -3,6 +3,17 @@ from scipy.sparse.linalg import spsolve_triangular
 import numpy as np
 import time
 
+from dev_poisson import Poisson2D, matvec_vmap, matvec_fori, matvec_segment
+from sparse_solver import prepare, matvec_v0, matvec_v1, matvec_v2, matvec_v3
+
+from pyndg.mesh_2d import Mesh2D
+from pyndg.bc_2d import BC
+
+import jax
+import jax.numpy as jnp
+import jax.experimental.sparse as jsparse
+
+jax.config.update("jax_enable_x64", True)
 
 class State:
     def __init__(self, data):
@@ -40,8 +51,10 @@ class StaticState:
 
         # system
         self.PRsystemC = data["PRsystemC"].tocsr()
+        self.PRsystem = data["PRsystem"].tocsr()
         self.PRperm = data["PRperm"].astype(np.int32).squeeze() - 1
         self.VELsystemC = data["VELsystemC"].tocsr()
+        self.VELsystem = data["VELsystem"].tocsr()
         self.VELperm = data["VELperm"].astype(np.int32).squeeze() - 1
 
         # splitting coef
@@ -417,45 +430,168 @@ def compare(state, state_ref):
 # --- pGMG
 
 
+class DummyParams:
+    def __init__(self, **kwargs):
+        self.has_periodic_bc = False
+        self.bc = {
+            12: BC.Dirichlet, # 12: Out
+            11: BC.Neumann,   # 11: In
+            13: BC.Neumann,   # 13: Wall
+            15: BC.Neumann,   # 15: Cyl
+        }
+        for k in kwargs:
+            setattr(self, k, kwargs[k])
+
+def run_benchmark(name, func, args, iters=100):
+    # Warmup (compilation happens here)
+    _ = func(*args).block_until_ready()
+
+    t0 = time.time()
+    for _ in range(iters):
+        func(*args).block_until_ready()  # Crucial for JAX timing!
+    t1 = time.time()
+
+    print(f"{name:16} {(t1 - t0) * 1000 / iters:8.2f} [ms]")
+
 if __name__ == "__main__":
     import cProfile
     import pstats
+    import matplotlib.pyplot as plt
 
     DIR = "/home/matteo/Documents/nodal-dg/Codes1.1/"
 
     N = 10
+
+    print(f"Loading reference mat N={N}")
     static_state, mesh = load(DIR + f"INS2D_N{N}_STATIC.mat", True)
     state = load(DIR + f"INS2D_N{N}_ts2.mat")
-    do_check = True
-    do_profile = False
 
-    run_time = 0
+    print("Reading mesh")
+    params = DummyParams(N=N, mesh_file=DIR + "Grid/CFD/cylinderA00075b.neu")
+    pyndg_mesh = Mesh2D(params)
+    pyndg_mesh.initialize()
 
-    def run():
-        # N = 5, 0.60[s] for 100 steps, 0.45 for backslash -> 1.5ms / system
-        # N = 7, 1.47[s] for 100 steps, 1.21 for backslash -> 4.0ms / system
-        # N = 8, 2.00[s] for 100 steps, 1.75 for backslash -> 6.0ms / system
-        global run_time
-        t0 = time.time()
-        for step in range(2, 20):
-            t0 = time.perf_counter()
-            ins2d_step(mesh, static_state, state)
-            run_time += time.perf_counter() - t0
-            if do_check:
-                state_ref = load(DIR + f"INS2D_N{N}_ts{step + 1}.mat")
-                compare(state, state_ref)
+    poisson_pb = Poisson2D(None, pyndg_mesh)
+    poisson_pb.assemble()
 
-    if do_profile:
-        with cProfile.Profile() as pr:
-            run()
+    PRperm_inv = np.empty_like(static_state.PRperm) 
+    PRperm_inv[static_state.PRperm] = np.arange(len(PRperm_inv), dtype=np.int32)
 
-        stats = pstats.Stats(pr)
-        stats.sort_stats("cumulative").print_stats()
-    else:
-        run()
+    PRsystem_org = static_state.PRsystem[PRperm_inv][:, PRperm_inv]
+    err = PRsystem_org - poisson_pb.stiff_mat
+    print("Pressure System Error:", np.max(np.abs(err)))
 
-    avg_solve_time = system_solve_time / system_solve_cnt
-    print(
-        f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)"
+
+    print("="*70)
+    print("="*70)
+
+    n_iters = 100
+
+    x_np = np.ones(PRsystem_org.shape[1])
+    x_jx = jnp.ones(PRsystem_org.shape[1])
+
+    mat_scipy_csr = static_state.PRsystem
+    mat_scipy_coo = static_state.PRsystem.tocoo()
+
+    t0 = time.perf_counter()
+    for _ in range(n_iters):
+        mat_scipy_coo @ x_np
+    t1 = time.perf_counter()
+    print(f"Scipy COO matvec     {(t1 - t0) * 1000 / n_iters:.2f} [ms]")
+
+    t0 = time.perf_counter()
+    for _ in range(n_iters):
+        mat_scipy_csr @ x_np
+    t1 = time.perf_counter()
+    print(f"Scipy CSR matvec     {(t1 - t0) * 1000 / n_iters:.2f} [ms]")
+
+    t0 = time.perf_counter()
+    for _ in range(n_iters):
+        poisson_pb.matvec(x_np)
+    t1 = time.perf_counter()
+    print(f"Block numpy matvec   {(t1 - t0) * 1000 / n_iters:.2f} [ms]")
+
+
+    matvec_vmap_ = jax.jit(lambda a, b, c: matvec_vmap(a, b, c, mesh.Np))
+    matvec_segment_ = jax.jit(lambda a, b, c: matvec_segment(a, b, c, mesh.Np))
+    matvec_fori_ = jax.jit(lambda a, b, c: matvec_fori(a, b, c, mesh.Np))
+
+    ij_jx = jnp.array(poisson_pb.ij)
+    stiff_jx = jnp.array(poisson_pb.stiff)
+    run_benchmark("JAX Vmap", matvec_vmap_, (x_jx, ij_jx, stiff_jx))
+    run_benchmark(
+        "JAX Segment Sum",
+        matvec_segment_,
+        (x_jx, ij_jx, stiff_jx),
     )
-    print(f"Run time: {run_time:.2f}")
+    run_benchmark("JAX Fori Loop", matvec_fori_, (x_jx, ij_jx, stiff_jx))
+
+    bcoo_mat = jsparse.BCOO.from_scipy_sparse(mat_scipy_csr, index_dtype=jnp.int32)
+    bcsr_mat = jsparse.BCSR.from_scipy_sparse(mat_scipy_csr, index_dtype=jnp.int32)
+
+    matvec_plain = jax.jit(lambda m, v: m @ v)
+
+    matvec_plain(bcoo_mat, x_jx).block_until_ready()
+    t0 = time.perf_counter()
+    for _ in range(n_iters):
+        matvec_plain(bcoo_mat, x_jx).block_until_ready()
+    t1 = time.perf_counter()
+    print(f"JAX COO matvec       {(t1 - t0) * 1000 / n_iters:.2f} [ms]")
+
+    matvec_plain(bcoo_mat, x_jx).block_until_ready()
+    t0 = time.perf_counter()
+    for _ in range(n_iters):
+        matvec_plain(bcsr_mat, x_jx).block_until_ready()
+    t1 = time.perf_counter()
+    print(f"JAX CSR matvec       {(t1 - t0) * 1000 / n_iters:.2f} [ms]")
+
+
+    d_jax, c_jax, _, max_bw = prepare(mat_scipy_csr)
+    print("BW", max_bw)
+    run_benchmark("JAX Synth blk V0", matvec_v0, (d_jax, c_jax, x_jx))
+    run_benchmark("JAX Synth blk V1", matvec_v1, (d_jax, c_jax, x_jx))
+    run_benchmark("JAX Synth blk V2", matvec_v2, (d_jax, c_jax, x_jx))
+    run_benchmark("JAX Synth blk V3", matvec_v3, (d_jax, c_jax, x_jx))
+
+
+
+    d_jax, c_jax, _, max_bw = prepare(static_state.PRsystemC)
+    print("BW", max_bw)
+    run_benchmark("JAX Synth blk V0", matvec_v0, (d_jax, c_jax, x_jx))
+    run_benchmark("JAX Synth blk V1", matvec_v1, (d_jax, c_jax, x_jx))
+    run_benchmark("JAX Synth blk V2", matvec_v2, (d_jax, c_jax, x_jx))
+    run_benchmark("JAX Synth blk V3", matvec_v3, (d_jax, c_jax, x_jx))
+
+    # do_check = True
+    # do_profile = False
+
+    # run_time = 0
+
+    # def run():
+    #     # N = 5, 0.60[s] for 100 steps, 0.45 for backslash -> 1.5ms / system
+    #     # N = 7, 1.47[s] for 100 steps, 1.21 for backslash -> 4.0ms / system
+    #     # N = 8, 2.00[s] for 100 steps, 1.75 for backslash -> 6.0ms / system
+    #     global run_time
+    #     t0 = time.time()
+    #     for step in range(2, 20):
+    #         t0 = time.perf_counter()
+    #         ins2d_step(mesh, static_state, state)
+    #         run_time += time.perf_counter() - t0
+    #         if do_check:
+    #             state_ref = load(DIR + f"INS2D_N{N}_ts{step + 1}.mat")
+    #             compare(state, state_ref)
+
+    # if do_profile:
+    #     with cProfile.Profile() as pr:
+    #         run()
+
+    #     stats = pstats.Stats(pr)
+    #     stats.sort_stats("cumulative").print_stats()
+    # else:
+    #     run()
+
+    # avg_solve_time = system_solve_time / system_solve_cnt
+    # print(
+    #     f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)"
+    # )
+    # print(f"Run time: {run_time:.2f}")

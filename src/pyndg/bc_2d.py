@@ -4,13 +4,7 @@ from enum import IntEnum
 
 class BC(IntEnum):
     NONE = 0
-    In = 1
-    Out = 2
-    Slip = 3
-    Far = 4
-    Dirichlet = 5
-    Sym = 6
+    Neumann = 1
+    Dirichlet = 2
+    Robin = 3
     Periodic = 7
-    Wall = 8
-    Cyl = 9
-    Neumann = 10

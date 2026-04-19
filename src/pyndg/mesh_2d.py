@@ -170,7 +170,7 @@ def _compute_bfaces_from_bctag(BCTag, EToV):
     for tag in unique_tags:
         elements, local_faces = np.where(BCTag == tag)
         v_indices = face_to_v[local_faces]
-        BFaces[BC(int(tag))] = EToV[elements[:, None], v_indices]
+        BFaces[int(tag)] = EToV[elements[:, None], v_indices]
     return BFaces
 
 
@@ -183,14 +183,13 @@ def mesh_reader_gambit_bc_2d(file_name):
     Assumes triangular elements (3 nodes per element).
     """
     NEU_BC_MAP = {
-        "In": BC.In,
-        "Out": BC.Out,
-        "Wall": BC.Wall,
-        "Far": BC.Far,
-        "Cyl": BC.Cyl,
+        "In": 11,
+        "Out": 12,
+        "Wall": 13,
+        "Cyl": 15,
         "Dirichlet": BC.Dirichlet,
         "Neuman": BC.Neumann,
-        "Slip": BC.Slip,
+        "Slip": 18,
     }
 
     with open(file_name, "r") as fid:
@@ -433,7 +432,6 @@ class Mesh2D:
     Reader = {"msh": read_gmsh_file, "neu": mesh_reader_gambit_bc_2d}
 
     def __init__(self, params):
-        assert isinstance(params, ScalarParam2D) or isinstance(params, EulerParam2D)
         self.params = params
         self.is_init = False
 
@@ -475,6 +473,7 @@ class Mesh2D:
         assert all([isinstance(k, int | BC) for k in self.bc.keys()])
         if 0 in self.bc.keys():
             assert self.bc[0] == 0, "BC Tag 0 is reserved"
+        self.bc[0] = 0
 
         print("Pre-computing geometric quantities")
         self.VX, self.VY = self.VXY[:, 0], self.VXY[:, 1]
@@ -987,7 +986,7 @@ class Mesh2D:
                     )
                     alphas = solve2x2(A, b)
                     if not (alphas[0] >= -MESH_TOL and alphas[1] >= -MESH_TOL):
-                        print("WARNING: The mesh triangulation is not appropriate")
+                        print(f"WARNING: Bad triangulation at element {i}")
                         self.problematic_alpha_elements.append(i)
                     self.patch_alphas[j, -1, i] = Kind[j + 2]
                 else:
