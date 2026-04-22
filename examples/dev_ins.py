@@ -562,36 +562,39 @@ if __name__ == "__main__":
     run_benchmark("JAX Synth blk V2", matvec_v2, (d_jax, c_jax, x_jx))
     run_benchmark("JAX Synth blk V3", matvec_v3, (d_jax, c_jax, x_jx))
 
-    # do_check = True
-    # do_profile = False
+    print("="*70)
+    print("="*70)
 
-    # run_time = 0
+    do_check = True
+    do_profile = False
 
-    # def run():
-    #     # N = 5, 0.60[s] for 100 steps, 0.45 for backslash -> 1.5ms / system
-    #     # N = 7, 1.47[s] for 100 steps, 1.21 for backslash -> 4.0ms / system
-    #     # N = 8, 2.00[s] for 100 steps, 1.75 for backslash -> 6.0ms / system
-    #     global run_time
-    #     t0 = time.time()
-    #     for step in range(2, 20):
-    #         t0 = time.perf_counter()
-    #         ins2d_step(mesh, static_state, state)
-    #         run_time += time.perf_counter() - t0
-    #         if do_check:
-    #             state_ref = load(DIR + f"INS2D_N{N}_ts{step + 1}.mat")
-    #             compare(state, state_ref)
+    run_time = 0
 
-    # if do_profile:
-    #     with cProfile.Profile() as pr:
-    #         run()
+    def run():
+        # N = 5, 0.60[s] for 100 steps, 0.45 for backslash -> 1.5ms / system
+        # N = 7, 1.47[s] for 100 steps, 1.21 for backslash -> 4.0ms / system
+        # N = 8, 2.00[s] for 100 steps, 1.75 for backslash -> 6.0ms / system
+        global run_time
+        t0 = time.time()
+        for step in range(2, 20):
+            t0 = time.perf_counter()
+            ins2d_step(mesh, static_state, state)
+            run_time += time.perf_counter() - t0
+            if do_check:
+                state_ref = load(DIR + f"INS2D_N{N}_ts{step + 1}.mat")
+                compare(state, state_ref)
 
-    #     stats = pstats.Stats(pr)
-    #     stats.sort_stats("cumulative").print_stats()
-    # else:
-    #     run()
+    if do_profile:
+        with cProfile.Profile() as pr:
+            run()
 
-    # avg_solve_time = system_solve_time / system_solve_cnt
-    # print(
-    #     f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)"
-    # )
-    # print(f"Run time: {run_time:.2f}")
+        stats = pstats.Stats(pr)
+        stats.sort_stats("cumulative").print_stats()
+    else:
+        run()
+
+    avg_solve_time = system_solve_time / system_solve_cnt
+    print(
+        f"System solve time: {system_solve_time:.2f} [s] ({avg_solve_time*1000:.2f} [ms] / sys)"
+    )
+    print(f"Run time: {run_time:.2f}")

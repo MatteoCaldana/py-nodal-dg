@@ -140,6 +140,24 @@ def jax_sp_fw_sub(lower_vals, row_cols, diag_vals, b):
     final_x = jax.lax.fori_loop(0, n, row_body, initial_x)
     return final_x[:n]
 
+@jax.jit
+def jax_sp_bw_sub(upper_vals, row_cols, diag_vals, b):
+    n = b.shape[0]
+    # x has n+1 elements. The index n is the "sink" for padding (always 0)
+    initial_x = jnp.zeros(n + 1)
+
+    def row_body(i, current_x):
+        # iterate backwards: i goes 0..n-1, actual row = n-1-i
+        row = n - 1 - i
+        vals = upper_vals[row]
+        cols = row_cols[row]
+        row_sum = jnp.dot(vals, current_x[cols])
+        xi = (b[row] - row_sum) / diag_vals[row]
+        return current_x.at[row].set(xi)
+
+    final_x = jax.lax.fori_loop(0, n, row_body, initial_x)
+    return final_x[:n]
+
 
 if __name__ == "__main__":
     DIR = "/home/matteo/Documents/nodal-dg/Codes1.1/"

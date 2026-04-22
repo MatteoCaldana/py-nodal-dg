@@ -19,6 +19,7 @@ import time
 import jax
 import jax.numpy as jnp
 from jax import lax
+
 jax.config.update("jax_enable_x64", True)
 
 np.set_printoptions(threshold=np.inf)
@@ -165,6 +166,63 @@ class Poisson2D:
 
         self.is_assembled = True
 
+    def assemble_rhs(self):
+        if self.is_assembled_rhs:
+            return self.rhs
+
+        Np = self.mesh.Np
+        Nfp = self.mesh.Nfp
+        K = self.mesh.K
+        mesh = self.mesh
+
+        self.rhs = np.zeros((Np, K))
+
+        self.uD = np.zeros_like(self.mesh.Fx)
+        self.uD[self.mesh.mapD] = self.params.uD(
+            self.mesh.Fx(self.mesh.mapD), self.mesh.Fy(self.mesh.mapD)
+        )
+
+        self.uN = np.zeros_like(self.mesh.Fx)
+        uNdx, uNdy = self.params.uN(
+            self.mesh.Fx(self.mesh.mapN), self.mesh.Fy(self.mesh.mapN)
+        )
+        self.uN[self.mesh.mapN] = (
+            self.mesh.nx(self.mesh.mapN) * uNdx + self.mesh.ny(self.mesh.mapN) * uNdy
+        )
+
+        for cid in range(K):
+            Dx = mesh.rx_avg[cid] * mesh.Dr + mesh.sx_avg[cid] * mesh.Ds
+            Dy = mesh.ry_avg[cid] * mesh.Dr + mesh.sy_avg[cid] * mesh.Ds
+            for lfid in range(3):
+
+                fslice = slice(lfid * Nfp, (lfid + 1) * Nfp)
+                Fm1 = mesh.vmapM[fslice, cid] % Np
+
+                lnx = mesh.nx[lfid * Nfp, cid]
+                lny = mesh.ny[lfid * Nfp, cid]
+                lsJ = mesh.sJ[lfid * Nfp, cid]
+                hinv = mesh.Fscale[lfid * Nfp, cid]
+
+                # Penalty parameter
+                gtau = self.tau * mesh.Nfp * mesh.Nfp * hinv
+                # Scaled face mass matrix
+                mmE = lsJ * mesh.mass_edge[:, :, lfid]
+                # Derivative operators
+                Dn1 = lnx * Dx + lny * Dy
+
+                bc_type = mesh.bc[mesh.BCTag[cid, lfid]]
+                match bc_type:
+                    case BC.Dirichlet:
+                        self.rhs[:, cid] += (
+                            gtau * mmE[:, Fm1] - Dn1.T * mmE[:, Fm1]
+                        ) * self.uD[fslice, cid]
+                    case BC.Neumann:
+                        self.rhs[:, cid] += mmE[:, Fm1] * self.uN[fslice, cid]
+                    case BC.NONE:
+                        pass
+                    case _:
+                        raise NotImplementedError(f"Cannot handle BC {bc_type}")
+
     def matvec(self, x):
         self._block_assemble()
         assert self.ij.shape[0] == self.stiff.shape[0]
@@ -225,25 +283,31 @@ def run_benchmark(name, func, args, iters=100):
 # - possible cuthill mckee reordering of elements for matvec
 # - pGMG
 
+
+class DummyParams:
+    def __init__(self, **kwargs):
+        self.has_periodic_bc = False
+        self.bc = {}
+        for k in kwargs:
+            setattr(self, k, kwargs[k])
+
+
 if __name__ == "__main__":
     N = 10
+    freq = 2
 
     data = scipy.io.loadmat(PATH + f"Poisson2D_N{N}.mat")
 
     mesh_name = "Grid/Other/circA01.neu"
 
-    params = ScalarParam2D(
-        model=Advection2D(),
-        name="Test",
+    params = DummyParams(
         N=N,
         mesh_file=PATH + mesh_name,
-        u_IC=lambda x: x,
-        bc={},  # {101: BC.Out, 102: BC.Slip, 103: BC.In, 104: BC.Slip},
-        final_time=1.0,
-        cfl=1.0,
-        time_integrator=LS54(),
-        viscosity_model=NoViscosity(),
-        limiter=Limiter(),
+        uD=lambda x, y: np.sin(freq * np.pi * x) * np.sin(freq * np.pi * y),
+        uN=lambda x, y: [
+            freq * np.pi * np.cos(freq * np.pi * x) * np.sin(freq * np.pi * y),
+            freq * np.pi * np.sin(freq * np.pi * x) * np.cos(freq * np.pi * y),
+        ],
     )
 
     mesh = Mesh2D(params)
