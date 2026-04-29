@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def read_gmsh_file(filename):
+def read_gmsh_file_2d(filename):
     with open(filename, "r") as fp:
         data = fp.read().split("\n")
     assert data[0] == "$MeshFormat"
