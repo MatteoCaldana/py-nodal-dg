@@ -44,13 +44,10 @@ def test_reference_matlab_2d():
         np.testing.assert_allclose(ops.Dphi_weak[0], data["Drw"], atol=4e-13)
         np.testing.assert_allclose(ops.Dphi_weak[1], data["Dsw"], atol=4e-13)
 
-        np.testing.assert_equal(ops.fmasks[0], data["Fmask"][:, 1].astype(int) - 1)
-        np.testing.assert_equal(ops.fmasks[1], data["Fmask"][:, 2].astype(int) - 1)
-        np.testing.assert_equal(ops.fmasks[2], data["Fmask"][:, 0].astype(int) - 1)
+        for d in range(3):
+            np.testing.assert_equal(ops.fmasks[d], data["Fmask"][:, d].astype(int) - 1)
 
-        Npf = ops.fmasks.shape[1]
-        lift = np.hstack([ops.lift[:, Npf * d : Npf * (d + 1)] for d in [2, 0, 1]])
-        np.testing.assert_allclose(lift, data["LIFT"], atol=1e-14)
+        np.testing.assert_allclose(ops.lift, data["LIFT"], atol=1e-14)
 
 
 def test_reference_matlab_3d():
@@ -75,11 +72,7 @@ def test_reference_matlab_3d():
         np.testing.assert_allclose(ops.Dphi_weak[1], data["Dsw"], atol=1e-10)
         np.testing.assert_allclose(ops.Dphi_weak[2], data["Dtw"], atol=1e-10)
 
-        np.testing.assert_equal(ops.fmasks[0], data["Fmask"][:, 2].astype(int) - 1)
-        np.testing.assert_equal(ops.fmasks[1], data["Fmask"][:, 3].astype(int) - 1)
-        np.testing.assert_equal(ops.fmasks[2], data["Fmask"][:, 1].astype(int) - 1)
-        np.testing.assert_equal(ops.fmasks[3], data["Fmask"][:, 0].astype(int) - 1)
+        for d in range(4):
+            np.testing.assert_equal(ops.fmasks[d], data["Fmask"][:, d].astype(int) - 1)
 
-        Npf = ops.fmasks.shape[1]
-        lift = np.hstack([ops.lift[:, Npf * d : Npf * (d + 1)] for d in [3, 2, 0, 1]])
-        np.testing.assert_allclose(lift, data["LIFT"], atol=1e-11)
+        np.testing.assert_allclose(ops.lift, data["LIFT"], atol=1e-11)

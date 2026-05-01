@@ -7,6 +7,15 @@ import pyndg.core.la as la
 
 import numpy as np
 
+_CELL_TOL = 1e-8
+
+
+REF_NORMALS = [
+    np.array([[1], [-1]]),
+    np.array([[0, -1], [1, 1], [-1, 0]]),
+    np.array([[0, 0, -1], [0, -1, 0], [1, 1, 1], [-1, 0, 0]]),
+]
+
 
 def nodes_1d_rst(N):
     return basis.jacobi_gl(0, 0, N).reshape((1, -1))
@@ -54,14 +63,29 @@ def grad_vandermonde(dim, N, rst):
     return np.stack(grad_V).reshape((dim, rst.shape[1], -1))
 
 
+_BARICENTRIC_COORDS_PERM = [
+    [0, 1],
+    [2, 0, 1],
+    [3, 2, 0, 1],
+]
+
+
 def _compute_barycentric_coordinates(rst):
     dim = rst.shape[0]
-    bary_coord = np.stack([-rst.sum(axis=0)] + [rst[d] for d in range(dim)])
+    bary_coord = [-rst.sum(axis=0) - dim + 2.0] + [rst[d] + 1.0 for d in range(dim)]
+    perm = _BARICENTRIC_COORDS_PERM[dim - 1]
+    fmasks = [
+        np.where(np.abs(bary_coord[perm[d]]) < _CELL_TOL)[0] for d in range(dim + 1)
+    ]
+    return np.stack(bary_coord), np.stack(fmasks)
 
-    fmasks = [np.where(np.isclose(bary_coord[0], dim - 2.0, atol=1e-8))[0]]
-    for d in range(dim):
-        fmasks.append(np.where(np.isclose(bary_coord[d + 1], -1.0, atol=1e-8))[0])
-    return bary_coord, np.stack(fmasks)
+
+# spatial dimension idxs that parametrize each face
+_PARAM_INDXS = [
+    [[0], [0]],
+    [[0], [0], [1]],
+    [[0, 1], [0, 2], [1, 2], [1, 2]],
+]
 
 
 class ReferenceElementOps:
@@ -116,16 +140,8 @@ class ReferenceElementOps:
         self.face_int_phiphi = np.empty((dim + 1, Nfp, Nfp), dtype=bkd.np_prec)
         prolongation = np.zeros((dim + 1, self.V.shape[0], Nfp), dtype=bkd.np_prec)
         for d in range(dim + 1):
-            if d == 0:
-                # any is good, is the face not parallel to any coorinate axis
-                param_indices = np.arange(dim - 1)
-            else:
-                # the (d + 1)-th face mask defines the face that are constant
-                # in the (d + 1)-th coordinate, so we can use the remaining
-                # coordinates as face parameters
-                param_indices = np.delete(np.arange(dim), d - 1)
             # get face parameterization
-            face_rst = self.rst[param_indices][:, self.fmasks[d]]
+            face_rst = self.rst[_PARAM_INDXS[dim - 1][d]][:, self.fmasks[d]]
 
             self.face_V[d] = vandermonde(dim - 1, N, face_rst)
             # prolong the face basis to the volume nodes

@@ -16,3 +16,6 @@ TODO:
 - test mesh creation: testing after poisson so if lucky we test it easily
 - test mesh refinement
 - test mesh reorder
+
+
+- add ruff

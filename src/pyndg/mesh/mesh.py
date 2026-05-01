@@ -224,9 +224,9 @@ def check_mesh_orientation_2d(VXY, e2v):
     p1, p2, p3 = VXY[e2v[:, 0]], VXY[e2v[:, 1]], VXY[e2v[:, 2]]
 
     # 2D cross product = twice the signed area (positive = CCW)
-    val = (p2[:, 0] - p1[:, 0]) * (p3[:, 1] - p1[:, 1]) - (p3[:, 0] - p1[:, 0]) * (
-        p2[:, 1] - p1[:, 1]
-    )
+    cr1 = (p2[:, 0] - p1[:, 0]) * (p3[:, 1] - p1[:, 1])
+    cr2 = (p3[:, 0] - p1[:, 0]) * (p2[:, 1] - p1[:, 1])
+    val = cr1 - cr2
 
     tol = 1e-12 * (np.max(np.abs(val)) or 1.0)
     inverted = np.where(val < -tol)[0]
