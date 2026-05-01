@@ -1,11 +1,27 @@
 import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import reverse_cuthill_mckee
+from pathlib import Path
+
+from pyndg.mesh.reader import read_gmsh_file_2d, mesh_reader_gambit
 
 
 LOCAL_FACE_TO_VERTEX = {
-    2: np.array([[0, 1], [1, 2], [2, 0]]),  # Triangles
-    3: np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]]),  # Tetrahedra
+    2: np.array(
+        [
+            [0, 1],
+            [1, 2],
+            [2, 0],
+        ]
+    ),  # Triangles
+    3: np.array(
+        [
+            [0, 1, 2],
+            [0, 1, 3],
+            [1, 2, 3],
+            [0, 2, 3],
+        ]
+    ),  # Tetrahedra
 }
 
 
@@ -34,7 +50,7 @@ def build_E2E_E2F(EToV):
 
     # We store: [sorted_vertex_indices, element_id, local_face_id]
     # To make sorting efficient, we sort vertex indices per face row-wise first
-    all_faces = np.zeros((total_faces, Np), dtype=int)
+    all_faces = np.zeros((total_faces, dim), dtype=int)
     for f in range(Nf):
         all_faces[f::Nf, :] = np.sort(EToV[:, faces_idx[f]], axis=1)
 
@@ -184,3 +200,209 @@ def reorder_cells(connectivity_edges, K):
     print("Old bandwidth:", old_bw)
     print("New bandwidth:", new_bw)
     return perm
+
+
+def read_mesh(filename: Path):
+    readers = {".msh": read_gmsh_file_2d, ".neu": mesh_reader_gambit}
+    fields = readers[filename.suffix](filename)
+    return Mesh(*fields)
+
+
+def check_mesh_orientation_2d(VXY, EToV):
+    """
+    Checks orientation of a 2D triangular mesh.
+
+    Parameters
+    ----------
+    VXY  : ndarray (N, 2)   Vertex coordinates.
+    EToV : ndarray (K, 3)   Element-to-vertex connectivity.
+
+    Returns
+    -------
+    inverted   : ndarray    Indices of CW-oriented (inverted) triangles.
+    degenerate : ndarray    Indices of flat/degenerate triangles (area ≈ 0).
+    """
+    p1, p2, p3 = VXY[EToV[:, 0]], VXY[EToV[:, 1]], VXY[EToV[:, 2]]
+
+    # 2D cross product = twice the signed area (positive = CCW)
+    val = (p2[:, 0] - p1[:, 0]) * (p3[:, 1] - p1[:, 1]) - (p3[:, 0] - p1[:, 0]) * (
+        p2[:, 1] - p1[:, 1]
+    )
+
+    tol = 1e-12 * (np.max(np.abs(val)) or 1.0)
+    inverted = np.where(val < -tol)[0]
+    degenerate = np.where(np.abs(val) <= tol)[0]
+
+    if len(inverted) == 0 and len(degenerate) == 0:
+        print("All triangles are properly oriented (CCW).")
+    else:
+        print(
+            f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate triangles."
+        )
+
+    return inverted, degenerate
+
+
+def check_mesh_orientation_3d(VXYZ, EToV):
+    """
+    Checks orientation of a 3D tetrahedral mesh.
+
+    Parameters
+    ----------
+    VXYZ : ndarray (N, 3)   Vertex coordinates.
+    EToV : ndarray (K, 4)   Element-to-vertex connectivity.
+
+    Returns
+    -------
+    inverted   : ndarray    Indices of inverted tetrahedra (vol < 0).
+    degenerate : ndarray    Indices of flat/degenerate tetrahedra (vol ≈ 0).
+    """
+    p1, p2, p3, p4 = (
+        VXYZ[EToV[:, 0]],
+        VXYZ[EToV[:, 1]],
+        VXYZ[EToV[:, 2]],
+        VXYZ[EToV[:, 3]],
+    )
+
+    a, b, c = p2 - p1, p3 - p1, p4 - p1
+
+    # Scalar triple product = 6 * signed volume
+    val = (
+        a[:, 0] * (b[:, 1] * c[:, 2] - b[:, 2] * c[:, 1])
+        - a[:, 1] * (b[:, 0] * c[:, 2] - b[:, 2] * c[:, 0])
+        + a[:, 2] * (b[:, 0] * c[:, 1] - b[:, 1] * c[:, 0])
+    )
+
+    tol = 1e-12 * (np.max(np.abs(val)) or 1.0)
+    inverted = np.where(val < -tol)[0]
+    degenerate = np.where(np.abs(val) <= tol)[0]
+
+    if len(inverted) == 0 and len(degenerate) == 0:
+        print("All tetrahedra are properly oriented.")
+    else:
+        print(
+            f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate tetrahedra."
+        )
+
+    return inverted, degenerate
+
+
+def check_mesh_orientation_1d(VX, EToV):
+    """
+    Checks orientation of a 1D edge mesh.
+
+    Parameters
+    ----------
+    VX   : ndarray (N,)    Vertex coordinates.
+    EToV : ndarray (K, 2)  Element-to-vertex connectivity.
+
+    Returns
+    -------
+    inverted   : ndarray   Indices of inverted edges (v1 < v0).
+    degenerate : ndarray   Indices of degenerate edges (v0 == v1).
+    """
+    # Signed length: positive means correctly oriented (v0 → v1)
+    val = VX[EToV[:, 1]] - VX[EToV[:, 0]]
+
+    tol = 1e-12 * (np.max(np.abs(val)) or 1.0)
+    inverted = np.where(val < -tol)[0]
+    degenerate = np.where(np.abs(val) <= tol)[0]
+
+    if len(inverted) == 0 and len(degenerate) == 0:
+        print("All edges are properly oriented.")
+    else:
+        print(f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate edges.")
+
+    return inverted, degenerate
+
+
+def check_mesh_orientation(V, EToV):
+    check_mesh_orientation_fns = [
+        check_mesh_orientation_1d,
+        check_mesh_orientation_2d,
+        check_mesh_orientation_3d,
+    ]
+    return check_mesh_orientation_fns[V.shape[1] - 1](V, EToV)
+
+
+class Mesh:
+    def __init__(self, VXYZ, K, Nv, EToV, b_faces, PerBToB, PerBFToF):
+        self.VXYZ = VXYZ
+        self.K = K
+        self.Nv = Nv
+        self.dim = VXYZ.shape[1]
+        self.EToV = EToV
+        self.BFaces = b_faces
+        self.PerBToB = PerBToB
+        self.PerBFToF = PerBFToF
+
+        check_mesh_orientation(VXYZ, EToV)
+
+        self.E2E, self.E2F, self.F2E = build_E2E_E2F(EToV)
+
+        self.connectivity_edges = list_connectivity_edges(self.E2E)
+        reorder_cells(self.connectivity_edges, self.K)
+
+    def plot(self, show_elem_id=True, show_vtx_id=True):
+        if self.dim == 2:
+            self._plot_2d(show_elem_id, show_vtx_id)
+        else:
+            print("Plotting not implemented for dim > 2.")
+
+    def _plot_2d(self, show_elem_id=True, show_vtx_id=True):
+        import matplotlib.pyplot as plt
+        from matplotlib.collections import LineCollection
+        import matplotlib.colors as mcolors
+
+        _, ax = plt.subplots(figsize=(10, 8))
+
+        # Extract all triangle edges from EToV
+        all_edges = []
+        for tri in self.EToV:
+            # tri contains indices of the 3 vertices
+            pts = self.VXYZ[tri]
+            all_edges.append((pts[0], pts[1]))
+            all_edges.append((pts[1], pts[2]))
+            all_edges.append((pts[2], pts[0]))
+
+        # Plot mesh in light gray to make BCs stand out
+        mesh_lc = LineCollection(
+            all_edges, colors="lightgray", linewidths=0.5, alpha=1.0
+        )
+        ax.add_collection(mesh_lc)
+
+        # Plot Boundary Edges by Tag
+        color_cycle = list(mcolors.TABLEAU_COLORS.values())
+        for i, (tag, faces) in enumerate(self.BFaces.items()):
+            bc_edges = []
+            for node_pair in faces:
+                p1 = self.VXYZ[node_pair[0]]
+                p2 = self.VXYZ[node_pair[1]]
+                bc_edges.append((p1, p2))
+
+            color = color_cycle[i % len(color_cycle)]
+            bc_lc = LineCollection(
+                bc_edges,
+                colors=color,
+                linewidths=2.5,
+                label=f"Tag ID={tag}, type={tag}",
+            )
+            ax.add_collection(bc_lc)
+
+        if show_elem_id:
+            for eid, tri in enumerate(self.EToV):
+                pts = self.VXYZ[tri].mean(axis=0)
+                plt.text(pts[0], pts[1], f"{eid}")
+
+        if show_vtx_id:
+            for i in range(self.VXYZ.shape[0]):
+                plt.text(self.VXYZ[i, 0], self.VXYZ[i, 1], f"{i}", color="r")
+
+        ax.set_aspect("equal")
+        ax.autoscale()
+        plt.title(f"2D Mesh: K={self.K}")
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.legend(loc="upper right", bbox_to_anchor=(1.25, 1))
+        plt.tight_layout()
+        plt.show()
