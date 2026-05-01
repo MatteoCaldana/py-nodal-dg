@@ -1,4 +1,4 @@
-import pyndg.operators.ref_elem_ops as ref_ops
+import pyndg.ops.refelem as ref_ops
 
 import numpy as np
 import scipy.io

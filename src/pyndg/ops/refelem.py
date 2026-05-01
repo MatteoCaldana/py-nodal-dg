@@ -1,3 +1,5 @@
+import math
+
 import pyndg.backend as bkd
 
 import pyndg.core.basis as basis
@@ -66,6 +68,13 @@ class ReferenceElementOps:
     def __init__(self, dim: int, N: int):
         assert isinstance(dim, int) and dim in [1, 2, 3]
         assert isinstance(N, int) and N >= 1
+
+        # number of nodes in the reference element
+        self.Np = math.comb(N + dim, dim)
+        # number of nodes on each face
+        self.Nfp = math.comb(N + dim - 1, dim - 1)
+        # number of faces
+        self.Nf = dim + 1
 
         # nodes on the reference element centered in (-1,)*dim, bbox size=2
         self.rst = nodes(dim, N)

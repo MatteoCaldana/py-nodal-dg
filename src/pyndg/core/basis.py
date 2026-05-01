@@ -422,7 +422,6 @@ _V3 = np.array([0, 2 / _SQRT3, -1 / _SQRT6], dtype=bkd.np_prec)
 _V4 = np.array([0, 0, 3 / _SQRT6], dtype=bkd.np_prec)
 
 
-
 def warp_shift_face_3d(p, pval, L1, L2, L3):
     # compute blending function at each node for each edge
     blend1 = L2 * L3
@@ -498,7 +497,7 @@ def nodes_3d(N):
         ids = np.where((La < TOL) & ((Lb > TOL) + (Lc > TOL) + (Ld > TOL) < 3))[0]
         shift[ids] = np.outer(warp1[ids], t1[face]) + np.outer(warp2[ids], t2[face])
 
-    XYZ += shift    
+    XYZ += shift
     return XYZ[:, 0], XYZ[:, 1], XYZ[:, 2]
 
 

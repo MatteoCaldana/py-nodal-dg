@@ -1,27 +1,32 @@
-from pyndg.operators.ref_elem_ops import ReferenceElementOps
+from pyndg.ops.refelem import ReferenceElementOps
 
 import numpy as np
 
 
-class MeshOperators:
+class MeshOps:
     def __init__(self, mesh, N):
         self.mesh = mesh
         self.N = N
         self.dim = mesh.dim
+        self.K = mesh.K
+        self.Nf = self.dim + 1
 
         self.ref_elem_ops = ReferenceElementOps(mesh.dim, N)
+        self.Np = self.ref_elem_ops.Np
+        self.Nfp = self.ref_elem_ops.Nfp
+
         self._build()
 
     def _build(self):
-        self._compute_barycentric_coordinates()
         self._compute_nodes_coordiantes()
+        self._compute_face_coordinates()
         self._compute_geometric_factors()
         self._compute_normals()
         self._compute_nodal_maps()
 
     def _compute_nodes_coordiantes(self):
         bcc = self.ref_elem_ops.bary_coord  # (dim + 1, Np)
-        fvxyz = self.mesh.vxyz[self.mesh.EToV]  # (K, Np, dim)
+        fvxyz = self.mesh.vxyz[self.mesh.e2v]  # (K, Np, dim)
         self.xyz = 0.5 * np.einsum("ir,kid->drk", bcc, fvxyz)  # (dim, Np, K)
 
     def _compute_face_coordinates(self):
@@ -30,7 +35,7 @@ class MeshOperators:
 
         self.fxyz has shape (dim, Nfp * Nfaces, K)
         """
-        self.fxyz = self.xyz[self.ref_elem_ops.fmasks.flat, :]
+        self.fxyz = self.xyz[:, self.ref_elem_ops.fmasks.flat, :]
 
     def _compute_geometric_factors(self):
         # derivative xyz to rst (dim, dim, Np, K)
@@ -60,7 +65,7 @@ class MeshOperators:
         self.surf_J has shape (Nfp * Nfaces, K)
         """
         Nfaces = self.dim + 1
-        fmasks = self.ref_elem_ops.fmasks.flat
+        fmasks = self.ref_elem_ops.fmasks
         self.sJ_rst_xyz = self.J_rst_xyz[:, :, fmasks.flat, :]
         sJ_rst_xyz = self.sJ_rst_xyz.reshape(
             self.dim, self.dim, Nfaces, self.Nfp, self.mesh.K
@@ -70,6 +75,7 @@ class MeshOperators:
         for d in range(self.dim):
             self.nxyz[:, d + 1, :, :] = -sJ_rst_xyz[d, :, d + 1, :, :]
         self.nxyz[:, 0, :, :] = sJ_rst_xyz[:, :, 0, :, :].sum(axis=1)
+        self.nxyz = self.nxyz.reshape(self.dim, Nfaces * self.Nfp, self.K)
 
         n_norm = np.linalg.norm(self.nxyz, axis=0)
         self.nxyz = self.nxyz / n_norm
@@ -82,28 +88,26 @@ class MeshOperators:
 
         Note: The Npf x dim row size of the map is to contract during the application of the 'lift' operator.
         """
-        K = self.mesh.K
-        Np = self.mesh.Np
-        nodeids = np.arange(Np * K).reshape(Np, K)
+        nodeids = np.arange(self.Np * self.K).reshape(self.Np, self.K)
         fmasks = self.ref_elem_ops.fmasks
 
-        self.vmap_m = np.empty((self.dim, self.Nfp, K), dtype=int)
+        self.vmap_m = np.empty((self.Nf, self.Nfp, self.K), dtype=int)
         for elem_id in range(self.K):
-            self.vmap_m[:, :, elem_id] = nodeids[fmasks.flat, elem_id]
+            self.vmap_m[:, :, elem_id].flat = nodeids[fmasks.flat, elem_id]
 
         # node map for the plus side, initialized as self-referential
         # usual convention that equality means boundary condition
-        self.vid_p = self.vmap_m.copy()
+        self.vmap_p = self.vmap_m.copy()
 
         # reference element length, should be the shortest edge of each element,
         # we set for an approximation assuming elements are not too distorted
-        bbox = np.max(self.mesh.VXYZ, axis=0) - np.min(self.mesh.VXYZ, axis=0)
+        bbox = np.max(self.mesh.vxyz, axis=0) - np.min(self.mesh.vxyz, axis=0)
         refd = (np.prod(bbox) / self.K) ** (1 / self.dim)
         print("Reference element length scale (approx):", refd)
 
         for cid in range(self.K):
             for lfid in range(self.dim + 1):
-                ncid, nlfid = self.EToE[cid, lfid], self.EToF[cid, lfid]
+                ncid, nlfid = self.mesh.e2e[cid, lfid], self.mesh.e2f[cid, lfid]
                 # node ids for the current face
                 vid_m = self.vmap_m[lfid, :, cid]
                 # node ids for the neighboring face

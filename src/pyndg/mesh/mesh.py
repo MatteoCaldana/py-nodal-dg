@@ -5,7 +5,6 @@ from pathlib import Path
 
 from pyndg.mesh.reader import read_gmsh_file_2d, mesh_reader_gambit
 
-
 LOCAL_FACE_TO_VERTEX = {
     2: np.array(
         [
@@ -25,12 +24,12 @@ LOCAL_FACE_TO_VERTEX = {
 }
 
 
-def build_E2E_E2F(EToV):
+def build_e2e_e2f(e2v):
     """
     Computes both Element-to-Element (EToE) and Element-to-Face (EToF) maps.
 
     Parameters:
-    EToV : ndarray (K, Np) - Element-to-Vertex map.
+    e2v : ndarray (K, Np) - Element-to-Vertex map.
 
     Returns:
     EToE : ndarray (K, Nf) - Neighboring element index for each face.
@@ -40,8 +39,8 @@ def build_E2E_E2F(EToV):
     Convention:
     If EToE[k, f] == k, then face f of element k is a boundary face.
     """
-    K = EToV.shape[0]  # Number of elements
-    Np = EToV.shape[1]  # Number of vertices per element (3 for Tri, 4 for Tet)
+    K = e2v.shape[0]  # Number of elements
+    Np = e2v.shape[1]  # Number of vertices per element (3 for Tri, 4 for Tet)
     Nf = Np  # Number of faces per element (3 for Tri, 4 for Tet)
     dim = Np - 1  # Dimension of the element (2 for Tri, 3 for Tet)
 
@@ -52,7 +51,7 @@ def build_E2E_E2F(EToV):
     # To make sorting efficient, we sort vertex indices per face row-wise first
     all_faces = np.zeros((total_faces, dim), dtype=int)
     for f in range(Nf):
-        all_faces[f::Nf, :] = np.sort(EToV[:, faces_idx[f]], axis=1)
+        all_faces[f::Nf, :] = np.sort(e2v[:, faces_idx[f]], axis=1)
 
     # Create a unique ID for each face for sorting
     # We use lexsort on the vertex columns to find matches
@@ -87,7 +86,7 @@ def build_E2E_E2F(EToV):
     FToE = {}
     for cell_id in range(K):
         for local_face_id in range(Nf):
-            face_vertices = tuple(sorted(EToV[cell_id, faces_idx[local_face_id]]))
+            face_vertices = tuple(sorted(e2v[cell_id, faces_idx[local_face_id]]))
             if face_vertices not in FToE:
                 FToE[face_vertices] = []
             FToE[face_vertices].append((cell_id, local_face_id))
@@ -208,21 +207,21 @@ def read_mesh(filename: Path):
     return Mesh(*fields)
 
 
-def check_mesh_orientation_2d(VXY, EToV):
+def check_mesh_orientation_2d(VXY, e2v):
     """
     Checks orientation of a 2D triangular mesh.
 
     Parameters
     ----------
     VXY  : ndarray (N, 2)   Vertex coordinates.
-    EToV : ndarray (K, 3)   Element-to-vertex connectivity.
+    e2v : ndarray (K, 3)   Element-to-vertex connectivity.
 
     Returns
     -------
     inverted   : ndarray    Indices of CW-oriented (inverted) triangles.
     degenerate : ndarray    Indices of flat/degenerate triangles (area ≈ 0).
     """
-    p1, p2, p3 = VXY[EToV[:, 0]], VXY[EToV[:, 1]], VXY[EToV[:, 2]]
+    p1, p2, p3 = VXY[e2v[:, 0]], VXY[e2v[:, 1]], VXY[e2v[:, 2]]
 
     # 2D cross product = twice the signed area (positive = CCW)
     val = (p2[:, 0] - p1[:, 0]) * (p3[:, 1] - p1[:, 1]) - (p3[:, 0] - p1[:, 0]) * (
@@ -243,14 +242,14 @@ def check_mesh_orientation_2d(VXY, EToV):
     return inverted, degenerate
 
 
-def check_mesh_orientation_3d(VXYZ, EToV):
+def check_mesh_orientation_3d(vxyz, e2v):
     """
     Checks orientation of a 3D tetrahedral mesh.
 
     Parameters
     ----------
-    VXYZ : ndarray (N, 3)   Vertex coordinates.
-    EToV : ndarray (K, 4)   Element-to-vertex connectivity.
+    vxyz : ndarray (N, 3)   Vertex coordinates.
+    e2v : ndarray (K, 4)   Element-to-vertex connectivity.
 
     Returns
     -------
@@ -258,10 +257,10 @@ def check_mesh_orientation_3d(VXYZ, EToV):
     degenerate : ndarray    Indices of flat/degenerate tetrahedra (vol ≈ 0).
     """
     p1, p2, p3, p4 = (
-        VXYZ[EToV[:, 0]],
-        VXYZ[EToV[:, 1]],
-        VXYZ[EToV[:, 2]],
-        VXYZ[EToV[:, 3]],
+        vxyz[e2v[:, 0]],
+        vxyz[e2v[:, 1]],
+        vxyz[e2v[:, 2]],
+        vxyz[e2v[:, 3]],
     )
 
     a, b, c = p2 - p1, p3 - p1, p4 - p1
@@ -287,14 +286,14 @@ def check_mesh_orientation_3d(VXYZ, EToV):
     return inverted, degenerate
 
 
-def check_mesh_orientation_1d(VX, EToV):
+def check_mesh_orientation_1d(VX, e2v):
     """
     Checks orientation of a 1D edge mesh.
 
     Parameters
     ----------
     VX   : ndarray (N,)    Vertex coordinates.
-    EToV : ndarray (K, 2)  Element-to-vertex connectivity.
+    e2v : ndarray (K, 2)  Element-to-vertex connectivity.
 
     Returns
     -------
@@ -302,7 +301,7 @@ def check_mesh_orientation_1d(VX, EToV):
     degenerate : ndarray   Indices of degenerate edges (v0 == v1).
     """
     # Signed length: positive means correctly oriented (v0 → v1)
-    val = VX[EToV[:, 1]] - VX[EToV[:, 0]]
+    val = VX[e2v[:, 1]] - VX[e2v[:, 0]]
 
     tol = 1e-12 * (np.max(np.abs(val)) or 1.0)
     inverted = np.where(val < -tol)[0]
@@ -316,31 +315,31 @@ def check_mesh_orientation_1d(VX, EToV):
     return inverted, degenerate
 
 
-def check_mesh_orientation(V, EToV):
+def check_mesh_orientation(V, e2v):
     check_mesh_orientation_fns = [
         check_mesh_orientation_1d,
         check_mesh_orientation_2d,
         check_mesh_orientation_3d,
     ]
-    return check_mesh_orientation_fns[V.shape[1] - 1](V, EToV)
+    return check_mesh_orientation_fns[V.shape[1] - 1](V, e2v)
 
 
 class Mesh:
-    def __init__(self, VXYZ, K, Nv, EToV, b_faces, PerBToB, PerBFToF):
-        self.VXYZ = VXYZ
+    def __init__(self, vxyz, K, Nv, e2v, b_faces, per_b2b, per_bf2f):
+        self.vxyz = vxyz
         self.K = K
         self.Nv = Nv
-        self.dim = VXYZ.shape[1]
-        self.EToV = EToV
-        self.BFaces = b_faces
-        self.PerBToB = PerBToB
-        self.PerBFToF = PerBFToF
+        self.dim = vxyz.shape[1]
+        self.e2v = e2v
+        self.b_faces = b_faces
+        self.per_b2b = per_b2b
+        self.per_bf2f = per_bf2f
 
-        check_mesh_orientation(VXYZ, EToV)
+        check_mesh_orientation(vxyz, e2v)
 
-        self.E2E, self.E2F, self.F2E = build_E2E_E2F(EToV)
+        self.e2e, self.e2f, self.f2e = build_e2e_e2f(e2v)
 
-        self.connectivity_edges = list_connectivity_edges(self.E2E)
+        self.connectivity_edges = list_connectivity_edges(self.e2e)
         reorder_cells(self.connectivity_edges, self.K)
 
     def plot(self, show_elem_id=True, show_vtx_id=True):
@@ -356,11 +355,11 @@ class Mesh:
 
         _, ax = plt.subplots(figsize=(10, 8))
 
-        # Extract all triangle edges from EToV
+        # Extract all triangle edges from e2v
         all_edges = []
-        for tri in self.EToV:
+        for tri in self.e2v:
             # tri contains indices of the 3 vertices
-            pts = self.VXYZ[tri]
+            pts = self.vxyz[tri]
             all_edges.append((pts[0], pts[1]))
             all_edges.append((pts[1], pts[2]))
             all_edges.append((pts[2], pts[0]))
@@ -373,11 +372,11 @@ class Mesh:
 
         # Plot Boundary Edges by Tag
         color_cycle = list(mcolors.TABLEAU_COLORS.values())
-        for i, (tag, faces) in enumerate(self.BFaces.items()):
+        for i, (tag, faces) in enumerate(self.b_faces.items()):
             bc_edges = []
             for node_pair in faces:
-                p1 = self.VXYZ[node_pair[0]]
-                p2 = self.VXYZ[node_pair[1]]
+                p1 = self.vxyz[node_pair[0]]
+                p2 = self.vxyz[node_pair[1]]
                 bc_edges.append((p1, p2))
 
             color = color_cycle[i % len(color_cycle)]
@@ -390,13 +389,13 @@ class Mesh:
             ax.add_collection(bc_lc)
 
         if show_elem_id:
-            for eid, tri in enumerate(self.EToV):
-                pts = self.VXYZ[tri].mean(axis=0)
+            for eid, tri in enumerate(self.e2v):
+                pts = self.vxyz[tri].mean(axis=0)
                 plt.text(pts[0], pts[1], f"{eid}")
 
         if show_vtx_id:
-            for i in range(self.VXYZ.shape[0]):
-                plt.text(self.VXYZ[i, 0], self.VXYZ[i, 1], f"{i}", color="r")
+            for i in range(self.vxyz.shape[0]):
+                plt.text(self.vxyz[i, 0], self.vxyz[i, 1], f"{i}", color="r")
 
         ax.set_aspect("equal")
         ax.autoscale()
