@@ -342,6 +342,27 @@ class Mesh:
         self.connectivity_edges = list_connectivity_edges(self.e2e)
         reorder_cells(self.connectivity_edges, self.K)
 
+    def get_cell_couple_id(self, cell_id1, cell_id2):
+        assert cell_id1 != cell_id2
+        if cell_id1 < cell_id2:
+            rev = False
+            a, b = cell_id1, cell_id2
+        else:
+            rev = True
+            a, b = cell_id2, cell_id1
+
+        K = int(self.connectivity_edges[:, 1].max()) + 1
+        keys = self.connectivity_edges[:, 0] * K + self.connectivity_edges[:, 1]
+        target = a * K + b
+
+        idx = int(np.searchsorted(keys, target))
+
+        n_couples = self.connectivity_edges.shape[0]
+        if idx < n_couples and keys[idx] == target:
+            return idx + n_couples if rev else idx
+        else:
+            raise ValueError(f"These cells are not connected {cell_id1} {cell_id2}")
+
     def plot(self, show_elem_id=True, show_vtx_id=True):
         if self.dim == 2:
             self._plot_2d(show_elem_id, show_vtx_id)

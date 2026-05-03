@@ -1,4 +1,11 @@
-from pyndg.core.basis import nodes_2d, nodes_3d, vandermonde_3d, xy_to_rs, vandermonde_2d, xyz_to_rst
+from pyndg.core.basis import (
+    nodes_2d,
+    nodes_3d,
+    vandermonde_3d,
+    xy_to_rs,
+    vandermonde_2d,
+    xyz_to_rst,
+)
 
 import numpy as np
 
@@ -20,6 +27,7 @@ def equispaced_tetrahedron_grid(n):
     t = Z.flatten()
     mask = (r >= -1) & (s >= -1) & (t >= -1) & (r + s + t <= -1)
     return r[mask], s[mask], t[mask]
+
 
 N_max = 5
 

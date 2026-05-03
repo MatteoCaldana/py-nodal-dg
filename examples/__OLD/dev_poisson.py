@@ -4,14 +4,14 @@ import os
 
 os.environ["PYNDG_BACKEND"] = "numpy"
 
-from pyndg.scalar_param_2d import ScalarParam2D
-from pyndg.mesh_2d import Mesh2D
+from __OLD.scalar_param_2d import ScalarParam2D
+from __OLD.mesh_2d import Mesh2D
 
-from pyndg.time_integrator import LS54
-from pyndg.physic_model import Advection2D
-from pyndg.bc_2d import BC
-from pyndg.limiters import Limiter
-from pyndg.viscosity_model import NoViscosity
+from __OLD.time_integrator import LS54
+from __OLD.physic_model import Advection2D
+from __OLD.bc_2d import BC
+from __OLD.limiters import Limiter
+from __OLD.viscosity_model import NoViscosity
 
 import numpy as np
 import time

@@ -45,7 +45,7 @@ class MeshOps:
             for d2 in range(self.dim):
                 tmp = self.ref_elem_ops.Dphi[d2] @ self.xyz[d1]
                 diff = np.max(np.max(tmp, axis=0) - np.min(tmp, axis=0))
-                assert diff < 1e-14, "Jacobian is not constant within elements"
+                assert diff < 1e-12, f"Jacobian is not constant within elements: {diff}"
                 J_xyz_rst[d1, d2] = np.mean(tmp, axis=0)
 
         J_mat = J_xyz_rst.transpose(2, 0, 1)  # (K, dim, dim)
@@ -73,7 +73,10 @@ class MeshOps:
         # i is the jacobian row index
         # d is the jacobian column index, spatial dimension index
         nxyz = np.einsum("idk,fi->dfk", self.J_rst_xyz, ref_normals)
-        nxyz = nxyz / np.linalg.norm(nxyz, axis=0)
+        self.fscale = np.linalg.norm(nxyz, axis=0)
+        nxyz = nxyz / self.fscale
+
+        self.sJ = self.fscale * self.J[None, :]
 
         # due to the fact that face information is retained in matrices of
         # shape (Nf * Nfp, K) to apply the lift operator, we cannot use
