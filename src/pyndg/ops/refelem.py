@@ -1,3 +1,4 @@
+import functools
 import math
 
 import pyndg.backend as bkd
@@ -93,10 +94,14 @@ class ReferenceElementOps:
         assert isinstance(dim, int) and dim in [1, 2, 3]
         assert isinstance(N, int) and N >= 1
 
+        # degree of the polynomial approximation
+        self.N = N
         # number of nodes in the reference element
         self.Np = math.comb(N + dim, dim)
         # number of nodes on each face
         self.Nfp = math.comb(N + dim - 1, dim - 1)
+        # dimension
+        self.dim = dim
         # number of faces
         self.Nf = dim + 1
 
@@ -163,3 +168,21 @@ class ReferenceElementOps:
         # - face mass matrix
         # - lift
         # - limiter/av stuff
+
+    def build_interp_mat(self, rst_out):
+        V_out = vandermonde(self.dim, self.N, rst_out)
+        return V_out @ self.invV
+
+    @staticmethod
+    @functools.lru_cache(maxsize=128)
+    def build_equi_grid(dim: int, n_pts_per_dim: int):
+        assert isinstance(dim, int) and dim in [1, 2, 3]
+        assert isinstance(n_pts_per_dim, int) and n_pts_per_dim >= 1
+
+        t = np.linspace(-1, 1, n_pts_per_dim + 1)
+        RST = np.meshgrid(*[t for _ in range(dim)])
+        rst = np.stack([u.flatten() for u in RST])
+        # keep the columns where the sum of coordinates is <= 2 - dim
+        # This defines the standard reference simplex in [-1, 1]^d
+        rst = rst[:, np.sum(rst, axis=0) <= (2 - dim) + 1e-7]
+        return rst

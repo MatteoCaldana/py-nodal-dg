@@ -10,6 +10,7 @@ class Poisson:
         self.mesh_ops = mesh_ops
 
         self.is_block_assembled = False
+        self.is_assembled_rhs = False
         self.is_assembled = False
 
         self.tau = params["penalty"]
@@ -18,6 +19,7 @@ class Poisson:
         if self.is_block_assembled:
             return
 
+        N = self.mesh_ops.N
         Np = self.mesh_ops.Np
         K = self.mesh_ops.K
         Nfp = self.mesh_ops.Nfp
@@ -57,7 +59,7 @@ class Poisson:
                 hinv = max(ops.fscale[lfid, cid], ops.fscale[nlfid, ncid])
 
                 # Penalty parameter
-                gtau = self.tau * Nfp * Nfp * hinv
+                gtau = self.tau * (N + 1) * (N + 1) * hinv
                 # Scaled face mass matrix
                 mmE = np.zeros_like(Dx)
                 mmE[np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])] = (
@@ -66,9 +68,7 @@ class Poisson:
                 # Derivative operators
                 Dn1 = lnx * Dx + lny * Dy
 
-                # TODO: fix
-                bc_type = BC.Dirichlet if ncid == cid else BC.NONE
-                # bc_type = mesh.bc[mesh.BCTag[cid, lfid]]
+                bc_type = mesh.face_tag[cid, lfid]
 
                 match bc_type:
                     case BC.Dirichlet:
@@ -148,66 +148,77 @@ class Poisson:
         jj = np.concatenate([jj, *jj12, *jj21])
         self.stiff_mat = scipy.sparse.coo_matrix(
             (self.stiff.flat, (ii, jj)), shape=(n, n)
-        )
+        ).tocsr()
 
         self.is_assembled = True
 
-    def assemble_rhs(self):
+    def assemble_rhs(self, rhs_fn, dir_fn, neu_fn):
         if self.is_assembled_rhs:
             return self.rhs
 
-        Np = self.mesh.Np
-        Nfp = self.mesh.Nfp
-        K = self.mesh.K
-        mesh = self.mesh
+        ops = self.mesh_ops
+        ref_ops = ops.ref_elem_ops
+        mesh = ops.mesh
+
+        Np = ops.Np
+        Nfp = ops.Nfp
+        K = mesh.K
+        N = ops.N
 
         self.rhs = np.zeros((Np, K))
 
-        self.uD = np.zeros_like(self.mesh.Fx)
-        self.uD[self.mesh.mapD] = self.params.uD(
-            self.mesh.Fx(self.mesh.mapD), self.mesh.Fy(self.mesh.mapD)
-        )
+        Fx = ops.fxyz[0]
+        Fy = ops.fxyz[1]
 
-        self.uN = np.zeros_like(self.mesh.Fx)
-        uNdx, uNdy = self.params.uN(
-            self.mesh.Fx(self.mesh.mapN), self.mesh.Fy(self.mesh.mapN)
-        )
-        self.uN[self.mesh.mapN] = (
-            self.mesh.nx(self.mesh.mapN) * uNdx + self.mesh.ny(self.mesh.mapN) * uNdy
-        )
+        map_d = ops.bc_nodes_maps[BC.Dirichlet]
+        self.u_dir = np.zeros_like(Fx)
+        self.u_dir[map_d] = dir_fn(Fx[map_d], Fy[map_d])
+        self.u_dir = self.u_dir.reshape(ops.Nf, Nfp, K)
+
+        map_n = ops.bc_nodes_maps[BC.Neumann]
+        un_x, un_y = neu_fn(Fx[map_n], Fy[map_n])
+        self.u_neu = np.zeros_like(Fx)
+        self.u_neu[map_n] = ops.nxyz[0, map_n] * un_x + ops.nxyz[1, map_n] * un_y
+        self.u_neu = self.u_neu.reshape(ops.Nf, Nfp, K)
 
         for cid in range(K):
-            Dx = mesh.rx_avg[cid] * mesh.Dr + mesh.sx_avg[cid] * mesh.Ds
-            Dy = mesh.ry_avg[cid] * mesh.Dr + mesh.sy_avg[cid] * mesh.Ds
+            Jmat = ops.J_rst_xyz[:, :, cid]
+            Dx = Jmat[0, 0] * ref_ops.Dphi[0] + Jmat[1, 0] * ref_ops.Dphi[1]
+            Dy = Jmat[0, 1] * ref_ops.Dphi[0] + Jmat[1, 1] * ref_ops.Dphi[1]
             for lfid in range(3):
-
-                fslice = slice(lfid * Nfp, (lfid + 1) * Nfp)
-                Fm1 = mesh.vmapM[fslice, cid] % Np
-
-                lnx = mesh.nx[lfid * Nfp, cid]
-                lny = mesh.ny[lfid * Nfp, cid]
-                lsJ = mesh.sJ[lfid * Nfp, cid]
-                hinv = mesh.Fscale[lfid * Nfp, cid]
+                Fm1 = ops.vmap_m[lfid, :, cid] // K
+                lnx, lny = ops.nxyz[:, lfid * Nfp, cid]
+                lsJ = ops.sJ[lfid, cid]
+                hinv = ops.fscale[lfid, cid]
 
                 # Penalty parameter
-                gtau = self.tau * mesh.Nfp * mesh.Nfp * hinv
+                gtau = self.tau * (N + 1) * (N + 1) * hinv
                 # Scaled face mass matrix
-                mmE = lsJ * mesh.mass_edge[:, :, lfid]
+                mmE = np.zeros_like(Dx)
+                mmE[np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])] = (
+                    lsJ * ref_ops.face_int_phiphi[lfid]
+                )
                 # Derivative operators
                 Dn1 = lnx * Dx + lny * Dy
 
-                bc_type = mesh.bc[mesh.BCTag[cid, lfid]]
+                bc_type = mesh.face_tag[cid, lfid]
                 match bc_type:
                     case BC.Dirichlet:
                         self.rhs[:, cid] += (
-                            gtau * mmE[:, Fm1] - Dn1.T * mmE[:, Fm1]
-                        ) * self.uD[fslice, cid]
+                            gtau * mmE[:, Fm1] - Dn1.T @ mmE[:, Fm1]
+                        ) @ self.u_dir[lfid, :, cid]
                     case BC.Neumann:
-                        self.rhs[:, cid] += mmE[:, Fm1] * self.uN[fslice, cid]
+                        self.rhs[:, cid] += mmE[:, Fm1] * self.u_neu[lfid, :, cid]
                     case BC.NONE:
                         pass
                     case _:
                         raise NotImplementedError(f"Cannot handle BC {bc_type}")
+
+        rhs_vol = ref_ops.int_phiphi @ (rhs_fn(ops.xyz[0], ops.xyz[1]) * ops.J[None, :])
+        self.rhs += rhs_vol
+
+        self.is_assembled_rhs = True
+        return self.rhs
 
     def matvec(self, x):
         self._block_assemble()

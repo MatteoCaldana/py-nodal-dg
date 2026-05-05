@@ -3,6 +3,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 from pathlib import Path
 
+from pyndg.mesh.bc import BC
 from pyndg.mesh.reader import read_gmsh_file_2d, mesh_reader_gambit
 
 LOCAL_FACE_TO_VERTEX = {
@@ -331,7 +332,7 @@ class Mesh:
         self.Nv = Nv
         self.dim = vxyz.shape[1]
         self.e2v = e2v
-        self.b_faces = b_faces
+        self.face_tag = b_faces
         self.per_b2b = per_b2b
         self.per_bf2f = per_bf2f
 
@@ -362,6 +363,14 @@ class Mesh:
             return idx + n_couples if rev else idx
         else:
             raise ValueError(f"These cells are not connected {cell_id1} {cell_id2}")
+
+    def build_bc(self, map_bc):
+        assert (
+            0 not in map_bc or map_bc[0] == BC.NoneType
+        ), "Tag 0 is reserved for untagged faces and cannot be used for boundary conditions."
+
+        for key, value in map_bc.items():
+            self.face_tag[self.face_tag == key] = value
 
     def plot(self, show_elem_id=True, show_vtx_id=True):
         if self.dim == 2:

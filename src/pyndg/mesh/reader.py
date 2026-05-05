@@ -96,19 +96,9 @@ def read_gmsh_file_2d(filename):
         b_faces[k] -= 1
     for k in PerBFToF:
         PerBFToF[k] -= 1
+
+    raise NotImplementedError("b_faces is in wrong format")
     return VXY, K, Nv, EToV, b_faces, PerBToB, PerBFToF
-
-
-def _compute_bfaces_from_bctag(BCTag, EToV):
-    BFaces = {}
-    face_to_v = np.array([[0, 1], [1, 2], [0, 2]])
-    unique_tags = np.unique(BCTag)
-    unique_tags = unique_tags[unique_tags != 0]
-    for tag in unique_tags:
-        elements, local_faces = np.where(BCTag == tag)
-        v_indices = face_to_v[local_faces]
-        BFaces[int(tag)] = EToV[elements[:, None], v_indices]
-    return BFaces
 
 
 _GAMBIT_BC_MAP = {
@@ -186,4 +176,4 @@ def mesh_reader_gambit(file_name):
                 bc_type[elem_idx, face_idx] = bc_flag
                 curr += 1
 
-    return VXY, K, Nv, EToV, _compute_bfaces_from_bctag(bc_type, EToV), None, None
+    return VXY, K, Nv, EToV, bc_type, None, None

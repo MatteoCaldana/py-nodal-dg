@@ -1,3 +1,4 @@
+from pyndg.mesh.bc import BC
 from pyndg.ops.refelem import REF_NORMALS, ReferenceElementOps
 
 import numpy as np
@@ -23,6 +24,7 @@ class MeshOps:
         self._compute_geometric_factors()
         self._compute_normals()
         self._compute_nodal_maps()
+        self._compute_bc_nodal_maps()
 
     def _compute_nodes_coordiantes(self):
         bcc = self.ref_elem_ops.bary_coord  # (dim + 1, Np)
@@ -131,3 +133,11 @@ class MeshOps:
         print(
             "WARNING: vmap_p periodicity and boundary conditions not implemented yet."
         )
+
+    def _compute_bc_nodal_maps(self):
+        self.bc_nodes_maps = {}
+        for tag in range(1, len(BC)):
+            map = np.zeros_like(self.vmap_m, dtype=bool)
+            cell_ids, local_face_ids = np.where(self.mesh.face_tag == tag)
+            map[local_face_ids, :, cell_ids] = True
+            self.bc_nodes_maps[tag] = map.reshape(-1, self.K)
