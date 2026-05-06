@@ -22,4 +22,5 @@ np_prec = _STR_TO_NP_PRECISION[PRECOMPUTE_PRECISION]
 jnp_prec = _STR_TO_JAX_PRECISION[RUN_COMPUTE_PRECISION]
 
 if RUN_COMPUTE_PRECISION == "f64":
+    print("Using double precision for computations (JAX)")
     jax.config.update("jax_enable_x64", True)

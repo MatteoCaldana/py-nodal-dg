@@ -114,6 +114,7 @@ class ReferenceElementOps:
 
         # mass matrix
         self.int_phiphi = self.invV.T @ self.invV
+        self.int_phiphi_inv = self.V @ self.V.T
 
         # strong form differentiation matrix (Dr, Ds, Dt)
         self.Dphi = dmatrices(dim, N, self.rst, self.V)

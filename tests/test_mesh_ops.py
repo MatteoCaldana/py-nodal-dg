@@ -1,5 +1,5 @@
 import pyndg.mesh
-import pyndg.ops.mesh
+import pyndg.ops.meshops
 
 from pathlib import Path
 import scipy.io
@@ -20,7 +20,7 @@ def test_2d_mesh_gambit_reader():
     ref_path = current_dir / "data" / f"mesh_{mesh_name}_N3.mat"
     ref_data = scipy.io.loadmat(ref_path)
 
-    mesh_ops = pyndg.ops.mesh.MeshOps(mesh, N=3)
+    mesh_ops = pyndg.ops.meshops.MeshOps(mesh, N=3)
 
     np.testing.assert_allclose(mesh_ops.xyz[0], ref_data["x"], atol=1e-15)
     np.testing.assert_allclose(mesh_ops.xyz[1], ref_data["y"], atol=1e-15)
@@ -74,7 +74,7 @@ def test_3d_mesh_gambit_reader():
     ref_path = current_dir / "data" / f"mesh_{mesh_name}_N3.mat"
     ref_data = scipy.io.loadmat(ref_path)
 
-    mesh_ops = pyndg.ops.mesh.MeshOps(mesh, N=3)
+    mesh_ops = pyndg.ops.meshops.MeshOps(mesh, N=3)
 
     np.testing.assert_allclose(mesh_ops.xyz[0], ref_data["x"], atol=1e-15)
     np.testing.assert_allclose(mesh_ops.xyz[1], ref_data["y"], atol=1e-15)

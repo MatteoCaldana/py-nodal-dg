@@ -35,7 +35,7 @@ def build_e2e_e2f(e2v):
     Returns:
     EToE : ndarray (K, Nf) - Neighboring element index for each face.
     EToF : ndarray (K, Nf) - Neighbor's local face index for each interface.
-    FToE : dict - Maps a facet (tuple of vtxs) to the list of (element, local_face) pairs that share it.
+    FToE : dict - Maps a facet (ordered tuple of vtxs) to the list of (element, local_face) pairs that share it.
 
     Convention:
     If EToE[k, f] == k, then face f of element k is a boundary face.
@@ -326,10 +326,10 @@ def check_mesh_orientation(V, e2v):
 
 
 class Mesh:
-    def __init__(self, vxyz, K, Nv, e2v, b_faces, per_b2b, per_bf2f):
+    def __init__(self, vxyz, e2v, b_faces, per_b2b, per_bf2f):
         self.vxyz = vxyz
-        self.K = K
-        self.Nv = Nv
+        self.K = e2v.shape[0]
+        self.Nv = vxyz.shape[0]
         self.dim = vxyz.shape[1]
         self.e2v = e2v
         self.face_tag = b_faces
@@ -341,28 +341,18 @@ class Mesh:
         self.e2e, self.e2f, self.f2e = build_e2e_e2f(e2v)
 
         self.connectivity_edges = list_connectivity_edges(self.e2e)
+        self._build_connectivity_edges_map()
         reorder_cells(self.connectivity_edges, self.K)
 
+    def _build_connectivity_edges_map(self):
+        self.connectivity_edges_map = {}
+        n_egdes = self.connectivity_edges.shape[0]
+        for idx, (cell_id1, cell_id2) in enumerate(self.connectivity_edges):
+            self.connectivity_edges_map[(cell_id1, cell_id2)] = idx
+            self.connectivity_edges_map[(cell_id2, cell_id1)] = idx + n_egdes
+
     def get_cell_couple_id(self, cell_id1, cell_id2):
-        assert cell_id1 != cell_id2
-        if cell_id1 < cell_id2:
-            rev = False
-            a, b = cell_id1, cell_id2
-        else:
-            rev = True
-            a, b = cell_id2, cell_id1
-
-        K = int(self.connectivity_edges[:, 1].max()) + 1
-        keys = self.connectivity_edges[:, 0] * K + self.connectivity_edges[:, 1]
-        target = a * K + b
-
-        idx = int(np.searchsorted(keys, target))
-
-        n_couples = self.connectivity_edges.shape[0]
-        if idx < n_couples and keys[idx] == target:
-            return idx + n_couples if rev else idx
-        else:
-            raise ValueError(f"These cells are not connected {cell_id1} {cell_id2}")
+        return self.connectivity_edges_map[(cell_id1, cell_id2)]
 
     def build_bc(self, map_bc):
         assert (
@@ -402,19 +392,26 @@ class Mesh:
 
         # Plot Boundary Edges by Tag
         color_cycle = list(mcolors.TABLEAU_COLORS.values())
-        for i, (tag, faces) in enumerate(self.b_faces.items()):
-            bc_edges = []
-            for node_pair in faces:
-                p1 = self.vxyz[node_pair[0]]
-                p2 = self.vxyz[node_pair[1]]
-                bc_edges.append((p1, p2))
+        bc_collections = {}
+        for cid in range(self.K):
+            for lfid in range(3):
+                tag = self.face_tag[cid, lfid]
+                if tag == 0:  # Skip untagged faces
+                    continue
 
-            color = color_cycle[i % len(color_cycle)]
+                p1 = self.vxyz[self.e2v[cid, LOCAL_FACE_TO_VERTEX[2][lfid, 0]]]
+                p2 = self.vxyz[self.e2v[cid, LOCAL_FACE_TO_VERTEX[2][lfid, 1]]]
+                edge = (p1, p2)
+
+                bc_collections.setdefault(tag, []).append(edge)
+
+        for tag, edges in bc_collections.items():
+            color = color_cycle[tag % len(color_cycle)]
             bc_lc = LineCollection(
-                bc_edges,
+                edges,
                 colors=color,
                 linewidths=2.5,
-                label=f"Tag ID={tag}, type={tag}",
+                label=f"Tag ID={tag}",
             )
             ax.add_collection(bc_lc)
 
@@ -429,7 +426,7 @@ class Mesh:
 
         ax.set_aspect("equal")
         ax.autoscale()
-        plt.title(f"2D Mesh: K={self.K}")
+        plt.title(f"2D Mesh: K={self.K}, Nv={self.Nv}")
         plt.xlabel("x")
         plt.ylabel("y")
         plt.legend(loc="upper right", bbox_to_anchor=(1.25, 1))

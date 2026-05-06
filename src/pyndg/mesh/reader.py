@@ -176,4 +176,6 @@ def mesh_reader_gambit(file_name):
                 bc_type[elem_idx, face_idx] = bc_flag
                 curr += 1
 
-    return VXY, K, Nv, EToV, bc_type, None, None
+    assert K == EToV.shape[0]
+    assert Nv == VXY.shape[0]
+    return VXY, EToV, bc_type, None, None

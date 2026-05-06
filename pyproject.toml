@@ -7,7 +7,7 @@ version = "0.1.0"
 description = "A small package to use nodal discontinuosu Galerking with AD."
 authors = [{name = "Matteo Caldana", email = "matteo.caldana@polimi.it"}]
 requires-python = ">=3.12"
-dependencies = ["numpy", "jax", "matplotlib", "gmsh", "scipy"]
+dependencies = ["numpy", "jax", "matplotlib", "gmsh==4.15.2", "scipy"]
 [project.optional-dependencies]
 dev = ["pytest", "black"]
 
