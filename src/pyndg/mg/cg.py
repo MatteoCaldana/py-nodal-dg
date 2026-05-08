@@ -21,6 +21,8 @@ Algorithm (left-preconditioned CG, a.k.a. the standard PCG):
 
 from typing import Callable, NamedTuple
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -159,11 +161,100 @@ pcg_jit = jax.jit(pcg, static_argnames=("A", "M", "max_iter"))
 
 
 # ---------------------------------------------------------------------------
+# Numpy
+# ---------------------------------------------------------------------------
+
+
+def pcg_np(
+    A,
+    b,
+    M=None,
+    x0=None,
+    tol: float = 1e-6,
+    atol: float = 0.0,
+    max_iter: int | None = None,
+):
+
+    n = b.shape[0]
+
+    if M is None:
+        M = lambda v: v  # identity preconditioner → plain CG
+
+    if x0 is None:
+        x0 = np.zeros_like(b)
+
+    if max_iter is None:
+        max_iter = n
+
+    b_norm = np.linalg.norm(b)
+    tol_eff = np.maximum(tol * b_norm, atol)  # combined stopping threshold
+
+    # -----------------------------------------------------------------------
+    # Initialise
+    # -----------------------------------------------------------------------
+    r0 = b - A(x0)
+    z0 = M(r0)
+    p0 = z0
+    rz0 = np.dot(r0, z0)
+    init_converged = np.linalg.norm(r0) < tol_eff
+
+    init_state = PCGState(
+        x=x0,
+        r=r0,
+        z=z0,
+        p=p0,
+        rz=rz0,
+        iteration=np.zeros((), dtype=np.int32),
+        converged=init_converged,
+    )
+
+    # -----------------------------------------------------------------------
+    # One CG step
+    # -----------------------------------------------------------------------
+    def step(state: PCGState) -> PCGState:
+        Ap = A(state.p)
+        alpha = state.rz / np.dot(state.p, Ap)
+
+        x_new = state.x + alpha * state.p
+        r_new = state.r - alpha * Ap
+        z_new = M(r_new)
+        rz_new = np.dot(r_new, z_new)
+
+        beta = rz_new / state.rz
+        p_new = z_new + beta * state.p
+
+        converged = np.linalg.norm(r_new) < tol_eff
+
+        return PCGState(
+            x=x_new,
+            r=r_new,
+            z=z_new,
+            p=p_new,
+            rz=rz_new,
+            iteration=state.iteration + 1,
+            converged=converged,
+        )
+
+    def cond_fun(state: PCGState):
+        return (~state.converged) & (state.iteration < max_iter)
+
+    val = init_state
+    while cond_fun(val):
+        val = step(val)
+
+    return PCGResult(
+        x=val.x,
+        residual_norm=np.linalg.norm(val.r),
+        iterations=val.iteration,
+        converged=val.converged,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Demo
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import numpy as np
-    from functools import partial
 
     jax.config.update("jax_enable_x64", True)
     rng = np.random.default_rng(0)
@@ -195,7 +286,7 @@ if __name__ == "__main__":
     # Example 2 – diagonal (Jacobi) preconditioner
     # ------------------------------------------------------------------
     _diag_inv = jnp.array(1.0 / np.diag(_A))
-    M_fn = lambda v: _diag_inv * v  # diagonal scaling
+    M_fn = lambda v, _: _diag_inv * v  # diagonal scaling
 
     result_pcg = pcg(A_fn, b, M=M_fn, tol=1e-10)
     print("\n=== PCG (Jacobi preconditioner) ===")

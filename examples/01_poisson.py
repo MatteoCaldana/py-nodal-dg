@@ -2,8 +2,9 @@ import jax
 import jax.numpy as jnp
 
 from pyndg.mesh import read_mesh
-from pyndg.mg.cg import pcg
-from pyndg.mg.mg import mg_iter
+from pyndg.mg.smoother import jacobi, chebyshev, chebyshev_v2, bjacobi
+from pyndg.mg.cg import pcg, pcg_np
+from pyndg.mg.mg import build_prolongator_restrictor, mg_iter
 from pyndg.ops.meshops import MeshOps
 from pyndg.mesh.bc import BC
 from pyndg.physics.poisson import Poisson
@@ -41,8 +42,17 @@ def rhs_fn(x, y):
     return 2 * freq * freq * np.pi * np.pi * sol_fn(x, y)
 
 
+_A_CALLS = 0
+_P_CALLS = 0
+
+def reset_counters():
+    global _A_CALLS, _P_CALLS
+    _A_CALLS = 0
+    _P_CALLS = 0
+
+
 if __name__ == "__main__":
-    N = 5
+    N = 10
 
     home_path = Path(__file__).resolve().parent.parent
     mesh_path = home_path / "mesh" / "gambit" / "circA01.neu"
@@ -62,68 +72,140 @@ if __name__ == "__main__":
 
     uh = scipy.sparse.linalg.spsolve(problem.stiff_mat, rhs.flatten(order="F"))
 
-    tmp = jnp.array(problem.stiff_mat.todense())
-    uh_v2 = pcg(lambda x: tmp @ x, rhs.flatten(order="F"), tol=1e-8, max_iter=10000)
-    print("CG converged:", uh_v2.converged)
-    print("CG iterations:", uh_v2.iterations)
-
-    diag = jnp.diag(tmp)
-    M_fn = lambda x: x / diag
-    uh_v2 = pcg(lambda x: tmp @ x, rhs.flatten(order="F"), M=M_fn, tol=1e-8)
-    print("CG converged:", uh_v2.converged)
-    print("CG iterations:", uh_v2.iterations)
-
+    def Afn(x):
+        global _A_CALLS
+        _A_CALLS += 1
+        return problem.stiff_mat @ x
+    
+    diag = problem.stiff_mat.diagonal()
+    def P_jacobi(x):
+        global _P_CALLS
+        _P_CALLS += 1
+        return x / diag
+    
     bdiag_inv = np.linalg.inv(problem.stiff[: mesh.K])
-    x_shape = (bdiag_inv.shape[0], bdiag_inv.shape[2], 1)
-    M_fn = lambda x: (bdiag_inv @ x.reshape(x_shape)).reshape(-1)
-    uh_v2 = pcg(lambda x: tmp @ x, rhs.flatten(order="F"), M=M_fn, tol=1e-8)
-    print("CG converged:", uh_v2.converged)
-    print("CG iterations:", uh_v2.iterations)
+    def P_bjacobi(x):
+        global _P_CALLS
+        _P_CALLS += 1
+        x_shape = (bdiag_inv.shape[0], bdiag_inv.shape[2], 1)
+        return (bdiag_inv @ x.reshape(x_shape)).reshape(-1)
+
+    rhs_flat = rhs.flatten(order="F")
+
+    uh_v2 = pcg_np(Afn, rhs_flat, tol=1e-8, max_iter=10000)
+    print("CG [Plain]  :", uh_v2.iterations, uh_v2.converged)
+    print(f"A calls: {_A_CALLS}, P calls: {_P_CALLS}")
+    reset_counters()
+
+    uh_v2 = pcg_np(Afn, rhs_flat, M=P_jacobi, tol=1e-8)
+    print("CG [Jacobi] :", uh_v2.iterations, uh_v2.converged)
+    print(f"A calls: {_A_CALLS}, P calls: {_P_CALLS}")
+    reset_counters()
+
+    uh_v2 = pcg_np(Afn, rhs_flat, M=P_bjacobi, tol=1e-8)
+    print("CG [bJacobi]:", uh_v2.iterations, uh_v2.converged)
+    print(f"A calls: {_A_CALLS}, P calls: {_P_CALLS}")
+    reset_counters()
 
     print("Diff with ref (PCG)", np.max(np.abs(uh_v2.x - uh)))
 
     ##########################################################################
     # multigrid
 
-    mesh_ops_coarse = MeshOps(mesh, N - 1)
+    mesh_ops_coarse = MeshOps(mesh, N - 3)
     problem_coarse = Poisson({"penalty": 20.0}, mesh_ops_coarse)
     problem_coarse.assemble()
 
-    Icf = mesh_ops_coarse.ref_elem_ops.build_interp_mat(mesh_ops.ref_elem_ops.rst)
-    Ifc = mesh_ops.ref_elem_ops.build_interp_mat(mesh_ops_coarse.ref_elem_ops.rst)
+    P, R = build_prolongator_restrictor(mesh_ops_coarse, mesh_ops)
+    R = P.T
 
     Np_f = mesh_ops.Np
     K = mesh_ops.K
     Np_c = mesh_ops_coarse.Np
 
-    P = Icf
-    R = (
-        mesh_ops_coarse.ref_elem_ops.int_phiphi_inv
-        @ Icf.T
-        @ mesh_ops.ref_elem_ops.int_phiphi
-    )
-
     uh = uh.reshape(mesh_ops.Np, mesh_ops.K, order="F")
 
-    A = problem.stiff_mat.todense()
-    Ac = np.zeros((Np_c * K, Np_c * K))
-    for i in range(K):
-        for j in range(K):
-            A_block = A[i * Np_f : (i + 1) * Np_f, j * Np_f : (j + 1) * Np_f]
-            Ac_block = R @ (A_block @ P)
-            Ac[i * Np_c : (i + 1) * Np_c, j * Np_c : (j + 1) * Np_c] = Ac_block
+    stiff_c = R @ (problem.stiff @ P)
+    stiff_mat_c = problem.assemble_stiff_from_blocks(mesh_ops.mesh, stiff_c)
+    #stiff_mat_c = problem_coarse.stiff_mat
 
-    uh_mg = mg_iter(
-        problem.stiff_mat, rhs.flatten(order="F"), np.zeros(uh.size), None, P, R, Ac
-    ).reshape(mesh_ops.Np, mesh_ops.K, order="F")
+    smooth_iters = 1
+    omega = 0.8
+    D_inv = 1.0 / diag
+    Db_inv = bdiag_inv
+    lambda_max = scipy.sparse.linalg.eigsh(
+        problem.stiff_mat, k=1, which="LM", return_eigenvectors=False
+    )
+    lambda_max = 1.1 * lambda_max
+    lambda_min = 0.05 * lambda_max
 
-    plot_2d(mesh_ops, uh)
-    plot_2d(mesh_ops, uh_mg)
 
-    # - plot projection to make sure it makes sense
+    def sm_jacobi(AAfn, bb, xx):
+        global _P_CALLS
+        _P_CALLS += smooth_iters
+        return jacobi(AAfn, D_inv, bb, xx, smooth_iters, omega=omega)
+
+    def sm_chebyshev(AAfn, bb, xx):
+        global _P_CALLS
+        _P_CALLS += smooth_iters
+        return chebyshev_v2(AAfn, bb, xx, smooth_iters, lambda_min, lambda_max)
+
+    def sm_bjacobi(AAfn, bb, xx):
+        global _P_CALLS
+        _P_CALLS += smooth_iters
+        return bjacobi(AAfn, Db_inv, bb, xx, smooth_iters, omega=1.0)
+    
+    smoother = sm_bjacobi
+
+    # uh_mg = np.zeros(uh.size)
+    # for it in range(1000):
+    #     uh_mg = mg_iter(
+    #         Afn,
+    #         rhs_flat,
+    #         uh_mg,
+    #         smoother,
+    #         P,
+    #         R,
+    #         stiff_mat_c,
+    #     )
+    #     res = rhs_flat - problem.stiff_mat @ uh_mg
+    #     res_norm = np.linalg.norm(res)
+    #     print(f"MG iter {it}, residual norm:", res_norm)
+    #     if res_norm < 1e-8:
+    #         break
+    
+    # res = rhs_flat - problem.stiff_mat @ uh_mg
+    # print("Residual (MG)", np.linalg.norm(res))
+
+    # uh_mg = uh_mg.reshape(mesh_ops.Np, mesh_ops.K, order="F")
+    # print("Diff with ref (MG)", np.max(np.abs(uh_mg - uh)))
+    
     # - mg iteration
     # - mg solver
     # - mg as preconditioner for CG
+
+    ##########################################################################
+
+    def mg_prec(rhs):
+        x0 = np.zeros_like(rhs)
+        for _ in range(1):
+            x0 = mg_iter(
+                Afn,
+                rhs,
+                x0,
+                smoother,
+                P,
+                R,
+                stiff_mat_c,
+            )
+        return x0
+
+    reset_counters()
+    mgcg = pcg_np(Afn, rhs_flat, M=mg_prec, tol=1e-8, max_iter=300)
+    uh_mg = mgcg.x.reshape(mesh_ops.Np, mesh_ops.K, order="F")
+    print("CG [MG]:", mgcg.iterations, mgcg.converged)
+    print(f"A calls: {_A_CALLS}, P calls: {_P_CALLS}")
+    reset_counters()
 
     ##########################################################################
 
@@ -131,17 +213,27 @@ if __name__ == "__main__":
     print("Diff with ref", np.max(np.abs(uh - data["u"])))
 
     uex = sol_fn(mesh_ops.xyz[0], mesh_ops.xyz[1])
+
     err = uh - uex
-
-    ref_mass = mesh_ops.ref_elem_ops.int_phiphi
-    err_l2 = np.sqrt(np.sum((err.T @ ref_mass) * mesh_ops.J[:, None] * err.T))
-
     err = err.flatten(order="F")
     err_l2 = np.sqrt(np.dot(err, problem.mass_mat @ err))
     err_h1 = np.sqrt(np.dot(err, problem.stiff_mat @ err))
-    print(f"Error: {err_l2:.3e} {err_h1:.3e}")
+    print(f"Error (LU): {err_l2:.3e} {err_h1:.3e}")
 
-    # plot_2d(mesh_ops, uh)
+    err = uh_v2.x.reshape(mesh_ops.Np, mesh_ops.K, order="F") - uex
+    err = err.flatten(order="F")
+    err_l2 = np.sqrt(np.dot(err, problem.mass_mat @ err))
+    err_h1 = np.sqrt(np.dot(err, problem.stiff_mat @ err))
+    print(f"Error (CG): {err_l2:.3e} {err_h1:.3e}")
+
+    err = uh_mg - uex
+    err = err.flatten(order="F")
+    err_l2 = np.sqrt(np.dot(err, problem.mass_mat @ err))
+    err_h1 = np.sqrt(np.dot(err, problem.stiff_mat @ err))
+    print(f"Error (MG): {err_l2:.3e} {err_h1:.3e}")
+
+    plot_2d(mesh_ops, uh)
+    plot_2d(mesh_ops, uh_mg)
 
     # TODO:
     # - multigrid solver

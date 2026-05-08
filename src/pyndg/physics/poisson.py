@@ -111,15 +111,37 @@ class Poisson:
         )
         self.is_block_assembled = True
 
-    def _get_block_idxs(self, cell_id1, cell_id2=None):
+    @staticmethod
+    def _get_block_idxs(Np, cell_id1, cell_id2=None):
         if cell_id2 is None:
             cell_id2 = cell_id1
 
-        Np = self.mesh_ops.Np
         row_indices = np.arange(cell_id1 * Np, (cell_id1 + 1) * Np, dtype=np.int32)
         col_indices = np.arange(cell_id2 * Np, (cell_id2 + 1) * Np, dtype=np.int32)
         rows_grid, cols_grid = np.meshgrid(row_indices, col_indices, indexing="ij")
         return rows_grid.flatten(), cols_grid.flatten()
+
+    @staticmethod
+    def assemble_stiff_from_blocks(mesh, stiff_blocks):
+        K = mesh.K
+        Np = stiff_blocks[0].shape[0]
+        n = K * Np
+
+        # stiffness
+        connectivity_edges = mesh.connectivity_edges
+        ii12, jj12 = zip(
+            *(Poisson._get_block_idxs(Np, k1, k2) for k1, k2 in connectivity_edges)
+        )
+        ii21, jj21 = zip(
+            *(Poisson._get_block_idxs(Np, k2, k1) for k1, k2 in connectivity_edges)
+        )
+        ii, jj = zip(*(Poisson._get_block_idxs(Np, k) for k in range(K)))
+        ii = np.concatenate([np.concatenate(ii), *ii12, *ii21])
+        jj = np.concatenate([np.concatenate(jj), *jj12, *jj21])
+        stiff_mat = scipy.sparse.coo_matrix(
+            (stiff_blocks.flat, (ii, jj)), shape=(n, n)
+        ).tocsr()
+        return stiff_mat
 
     def assemble(self):
         self._block_assemble()
@@ -127,8 +149,9 @@ class Poisson:
             return
 
         K = self.mesh_ops.K
+        Np = self.mesh_ops.Np
         # mass
-        ii, jj = zip(*(self._get_block_idxs(k) for k in range(K)))
+        ii, jj = zip(*(self._get_block_idxs(Np, k) for k in range(K)))
         ii = np.concatenate(ii)
         jj = np.concatenate(jj)
         n = K * self.mesh_ops.Np
@@ -137,18 +160,7 @@ class Poisson:
         )
 
         # stiffness
-        connectivity_edges = self.mesh_ops.mesh.connectivity_edges
-        ii12, jj12 = zip(
-            *(self._get_block_idxs(k1, k2) for k1, k2 in connectivity_edges)
-        )
-        ii21, jj21 = zip(
-            *(self._get_block_idxs(k2, k1) for k1, k2 in connectivity_edges)
-        )
-        ii = np.concatenate([ii, *ii12, *ii21])
-        jj = np.concatenate([jj, *jj12, *jj21])
-        self.stiff_mat = scipy.sparse.coo_matrix(
-            (self.stiff.flat, (ii, jj)), shape=(n, n)
-        ).tocsr()
+        self.stiff_mat = self.assemble_stiff_from_blocks(self.mesh_ops.mesh, self.stiff)
 
         self.is_assembled = True
 
