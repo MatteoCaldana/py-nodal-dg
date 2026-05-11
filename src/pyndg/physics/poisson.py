@@ -1,7 +1,115 @@
+from typing import NamedTuple
+from xml.etree.ElementPath import ops
+
+import jax
+import jax.numpy as jnp
 import numpy as np
 import scipy.sparse
+import operator
+from functools import reduce
 
 from pyndg.mesh.bc import BC
+from pyndg.ops.meshops import MeshData
+
+
+class PoissonData(NamedTuple):
+    penalty: float
+    stiff: jax.Array
+    stiff_coupling: jax.Array
+    mass: jax.Array
+
+
+@jax.jit(static_argnames=["dims"])
+def _block_assemble_kernel(mesh_data, penalty, dims):
+    class CarryData(NamedTuple):
+        mdata: MeshData
+        pdata: PoissonData
+
+    data = CarryData(
+        mdata=mesh_data,
+        pdata=PoissonData(
+            penalty=penalty,
+            stiff=jnp.zeros((dims.K, dims.Np, dims.Np)),
+            stiff_coupling=jnp.zeros((dims.K, dims.Nf, dims.Np, dims.Np)),
+            mass=jnp.zeros((dims.K, dims.Np, dims.Np)),
+        ),
+    )
+
+    Np = dims.Np
+
+    def _dirichlet(mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2):
+        return gtau * mmE - mmE @ Dn1 - Dn1.T @ mmE, jnp.zeros((Np, Np))
+
+    def _neumann(mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2):
+        return jnp.zeros((Np, Np)), jnp.zeros((Np, Np))
+
+    def _interior(mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2):
+        Jmat = mesh_data.J_rst_xyz[:, :, ncid]
+        Dx2 = Jmat[0, 0] * mesh_data.Dphi[0] + Jmat[1, 0] * mesh_data.Dphi[1]
+        Dy2 = Jmat[0, 1] * mesh_data.Dphi[0] + Jmat[1, 1] * mesh_data.Dphi[1]
+        Dn2 = lnx * Dx2 + lny * Dy2
+
+        loc_stiff = jnp.zeros((Np, Np))
+        loc_stiff = loc_stiff.at[:, Fm2].add(-0.5 * gtau * mmE[:, Fm1])
+        loc_stiff = loc_stiff.at[Fm1, :].add(
+            -0.5 * mmE[jnp.ix_(Fm1, Fm1)] @ Dn2[Fm2, :]
+        )
+        loc_stiff = loc_stiff.at[:, Fm2].add(0.5 * (Dn1.T @ mmE[:, Fm1]))
+
+        return 0.5 * (gtau * mmE - mmE @ Dn1 - Dn1.T @ mmE), loc_stiff
+
+    branches = [_interior, _dirichlet, _neumann]
+
+    def _assemble_elem_kernel(data, cid):
+        mesh_data = data.mdata
+        data.pdata.mass.at[cid].set(mesh_data.J[cid] * mesh_data.int_phiphi)
+
+        # global stiff
+        Jmat = mesh_data.J_rst_xyz[:, :, cid]
+        Dx = Jmat[0, 0] * mesh_data.Dphi[0] + Jmat[1, 0] * mesh_data.Dphi[1]
+        Dy = Jmat[0, 1] * mesh_data.Dphi[0] + Jmat[1, 1] * mesh_data.Dphi[1]
+
+        data.pdata.stiff.at[cid].set(
+            mesh_data.J[cid]
+            * (Dx.T @ mesh_data.int_phiphi @ Dx + Dy.T @ mesh_data.int_phiphi @ Dy)
+        )
+
+        # face loop
+        for lfid in range(dims.dim):  # lfid = local face id
+            ncid = mesh_data.e2e[cid, lfid]  # neigh cell id
+            nlfid = mesh_data.e2f[cid, lfid]  # neigh local face id
+
+            Fm1 = mesh_data.vmap_m[lfid, :, cid] // dims.K
+            Fm2 = mesh_data.vmap_p[lfid, :, cid] // dims.K
+
+            lnx, lny = mesh_data.nxyz[:, lfid * dims.Nfp, cid]
+            lsJ = mesh_data.sJ[lfid, 0, cid]
+
+            hinv = jnp.max(mesh_data.fscale[[lfid, nlfid], 0, cid])
+
+            # Penalty parameter
+            gtau = data.pdata.penalty * (dims.N + 1) * (dims.N + 1) * hinv
+            # Scaled face mass matrix
+            mmE = jnp.zeros_like(Dx)
+            mmE.at[jnp.ix_(mesh_data.fmasks[lfid], mesh_data.fmasks[lfid])].set(
+                lsJ * mesh_data.face_int_phiphi[lfid]
+            )
+            # Derivative operators
+            Dn1 = lnx * Dx + lny * Dy
+
+            tag = mesh_data.face_tag[cid, lfid]
+
+            dstiff, cstiff = jax.lax.switch(
+                tag, branches, mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2
+            )
+
+            data.pdata.stiff.at[cid].add(dstiff)
+            data.pdata.stiff_coupling.at[cid, lfid].add(cstiff)
+
+        return data, None
+
+    data, _ = jax.lax.scan(_assemble_elem_kernel, data, jnp.arange(dims.K))
+    return data.pdata
 
 
 class Poisson:
@@ -14,6 +122,18 @@ class Poisson:
         self.is_assembled = False
 
         self.tau = params["penalty"]
+        self.bc_tags_map = params["bc_tags"]
+        assert (0 not in self.bc_tags_map) or (
+            self.bc_tags_map[0] == BC.NONE
+        ), "Tag 0 is reserved for internal faces and must be mapped to BC.NONE"
+        # map mesh tag to BC type
+        self.bc_tags_map[0] = BC.NONE
+        # map BC type to mesh tag
+        self.bc_tags_map_rev = {}
+        for tag, bc in self.bc_tags_map.items():
+            if bc not in self.bc_tags_map_rev:
+                self.bc_tags_map_rev[bc] = []
+            self.bc_tags_map_rev[bc].append(tag)
 
     def _block_assemble(self):
         if self.is_block_assembled:
@@ -55,8 +175,8 @@ class Poisson:
                 Fm2 = ops.vmap_p[lfid, :, cid] // K
 
                 lnx, lny = ops.nxyz[:, lfid * Nfp, cid]
-                lsJ = ops.sJ[lfid, cid]
-                hinv = max(ops.fscale[lfid, cid], ops.fscale[nlfid, ncid])
+                lsJ = ops.sJ[lfid, 0, cid]
+                hinv = max(ops.fscale[lfid, 0, cid], ops.fscale[nlfid, 0, ncid])
 
                 # Penalty parameter
                 gtau = self.tau * (N + 1) * (N + 1) * hinv
@@ -68,7 +188,7 @@ class Poisson:
                 # Derivative operators
                 Dn1 = lnx * Dx + lny * Dy
 
-                bc_type = mesh.face_tag[cid, lfid]
+                bc_type = self.bc_tags_map[mesh.face_tag[cid, lfid]]
 
                 match bc_type:
                     case BC.Dirichlet:
@@ -179,15 +299,20 @@ class Poisson:
 
         self.rhs = np.zeros((Np, K))
 
+        # TODO: generalize to 3D
         Fx = ops.fxyz[0]
         Fy = ops.fxyz[1]
 
-        map_d = ops.bc_nodes_maps[BC.Dirichlet]
+        empty_bc = np.zeros_like(Fx, dtype=bool)
+
+        d_tags = self.bc_tags_map_rev.get(BC.Dirichlet, [])
+        map_d = reduce(operator.or_, [ops.bc_maps[tag] for tag in d_tags], empty_bc)
         self.u_dir = np.zeros_like(Fx)
         self.u_dir[map_d] = dir_fn(Fx[map_d], Fy[map_d])
         self.u_dir = self.u_dir.reshape(ops.Nf, Nfp, K)
 
-        map_n = ops.bc_nodes_maps[BC.Neumann]
+        n_tags = self.bc_tags_map_rev.get(BC.Neumann, [])
+        map_n = reduce(operator.or_, [ops.bc_maps[tag] for tag in n_tags], empty_bc)
         un_x, un_y = neu_fn(Fx[map_n], Fy[map_n])
         self.u_neu = np.zeros_like(Fx)
         self.u_neu[map_n] = ops.nxyz[0, map_n] * un_x + ops.nxyz[1, map_n] * un_y
@@ -200,8 +325,8 @@ class Poisson:
             for lfid in range(3):
                 Fm1 = ops.vmap_m[lfid, :, cid] // K
                 lnx, lny = ops.nxyz[:, lfid * Nfp, cid]
-                lsJ = ops.sJ[lfid, cid]
-                hinv = ops.fscale[lfid, cid]
+                lsJ = ops.sJ[lfid, 0, cid]
+                hinv = ops.fscale[lfid, 0, cid]
 
                 # Penalty parameter
                 gtau = self.tau * (N + 1) * (N + 1) * hinv
@@ -213,7 +338,7 @@ class Poisson:
                 # Derivative operators
                 Dn1 = lnx * Dx + lny * Dy
 
-                bc_type = mesh.face_tag[cid, lfid]
+                bc_type = self.bc_tags_map[mesh.face_tag[cid, lfid]]
                 match bc_type:
                     case BC.Dirichlet:
                         self.rhs[:, cid] += (

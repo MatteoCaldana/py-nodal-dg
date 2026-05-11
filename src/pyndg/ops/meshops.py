@@ -1,7 +1,52 @@
-from pyndg.mesh.bc import BC
 from pyndg.ops.refelem import REF_NORMALS, ReferenceElementOps
+import pyndg.backend as bkd
 
+from typing import NamedTuple
+import jax
+import jax.numpy as jnp
 import numpy as np
+
+
+class MeshDims(NamedTuple):
+    N: int
+    Np: int
+    Nfp: int
+    dim: int
+    Nf: int
+    K: int
+
+
+class MeshData(NamedTuple):
+    # mesh
+    e2e: jax.Array
+    e2f: jax.Array
+    face_tag: jax.Array
+    connectivity_edge_map: dict
+    connectivity_edges: jax.Array
+    # reference element data
+    rst: jax.Array
+    V: jax.Array
+    invV: jax.Array
+    int_phiphi: jax.Array
+    int_phiphi_inv: jax.Array
+    Dphi: jax.Array
+    int_phiDphi: jax.Array
+    Dphi_weak: jax.Array
+    int_DphiDphi: jax.Array
+    bary_coord: jax.Array
+    fmasks: jax.Array
+    face_int_phiphi: jax.Array
+    # mesh ops data
+    xyz: jax.Array
+    fxyz: jax.Array
+    J: jax.Array
+    J_rst_xyz: jax.Array
+    nxyz: jax.Array
+    sJ: jax.Array
+    fscale: jax.Array
+    vmap_m: jax.Array
+    vmap_p: jax.Array
+    bc_maps: dict[int, jax.Array]
 
 
 class MeshOps:
@@ -86,6 +131,10 @@ class MeshOps:
         # so we reshape it to (dim, Nf * Nfp, K)
         self.nxyz = np.repeat(nxyz, self.Nfp, axis=1)
 
+        new_shape = (self.Nf, self.Nfp, self.K)
+        self.fscale = np.repeat(self.fscale, self.Nfp, axis=0).reshape(new_shape)
+        self.sJ = np.repeat(self.sJ, self.Nfp, axis=0).reshape(new_shape)
+
     def _compute_nodal_maps(self):
         """
         Compute the minus and plus node maps for each face of each element.
@@ -135,9 +184,62 @@ class MeshOps:
         )
 
     def _compute_bc_nodal_maps(self):
-        self.bc_nodes_maps = {}
-        for tag in range(1, len(BC)):
+        self.bc_maps = {}
+
+        if self.mesh.face_tag is None:
+            print("WARNING: mesh has no face tags, no BC will be applied.")
+            return
+
+        tags = np.sort(np.unique(self.mesh.face_tag))
+        assert (
+            tags[0] == 0
+        ), "Mesh has no internal edges. Tag 0 is reserved for untagged faces."
+        for tag in tags[1:]:
             map = np.zeros_like(self.vmap_m, dtype=bool)
             cell_ids, local_face_ids = np.where(self.mesh.face_tag == tag)
             map[local_face_ids, :, cell_ids] = True
-            self.bc_nodes_maps[tag] = map.reshape(-1, self.K)
+            self.bc_maps[tag] = map.reshape(-1, self.K)
+
+    def build_mesh_data(self):
+        return MeshDims(
+            N=self.N,
+            Np=self.Np,
+            Nfp=self.Nfp,
+            dim=self.dim,
+            Nf=self.Nf,
+            K=self.K,
+        ), MeshData(
+            e2e=jnp.array(self.mesh.e2e, dtype=jnp.int32),
+            e2f=jnp.array(self.mesh.e2f, dtype=jnp.int32),
+            face_tag=jnp.array(self.mesh.face_tag, dtype=jnp.int32),
+            connectivity_edge_map=self.mesh.connectivity_edges_map,
+            connectivity_edges=jnp.array(self.mesh.connectivity_edges, dtype=jnp.int32),
+            rst=jnp.array(self.ref_elem_ops.rst, dtype=bkd.jnp_prec),
+            V=jnp.array(self.ref_elem_ops.V, dtype=bkd.jnp_prec),
+            invV=jnp.array(self.ref_elem_ops.invV, dtype=bkd.jnp_prec),
+            int_phiphi=jnp.array(self.ref_elem_ops.int_phiphi, dtype=bkd.jnp_prec),
+            int_phiphi_inv=jnp.array(
+                self.ref_elem_ops.int_phiphi_inv, dtype=bkd.jnp_prec
+            ),
+            Dphi=jnp.array(self.ref_elem_ops.Dphi, dtype=bkd.jnp_prec),
+            int_phiDphi=jnp.array(self.ref_elem_ops.int_phiDphi, dtype=bkd.jnp_prec),
+            Dphi_weak=jnp.array(self.ref_elem_ops.Dphi_weak, dtype=bkd.jnp_prec),
+            int_DphiDphi=jnp.array(self.ref_elem_ops.int_DphiDphi, dtype=bkd.jnp_prec),
+            bary_coord=jnp.array(self.ref_elem_ops.bary_coord, dtype=bkd.jnp_prec),
+            fmasks=jnp.array(self.ref_elem_ops.fmasks, dtype=jnp.int32),
+            face_int_phiphi=jnp.array(
+                self.ref_elem_ops.face_int_phiphi, dtype=bkd.jnp_prec
+            ),
+            xyz=jnp.array(self.xyz, dtype=bkd.jnp_prec),
+            fxyz=jnp.array(self.fxyz, dtype=bkd.jnp_prec),
+            J=jnp.array(self.J, dtype=bkd.jnp_prec),
+            J_rst_xyz=jnp.array(self.J_rst_xyz, dtype=bkd.jnp_prec),
+            nxyz=jnp.array(self.nxyz, dtype=bkd.jnp_prec),
+            sJ=jnp.array(self.sJ, dtype=bkd.jnp_prec),
+            fscale=jnp.array(self.fscale, dtype=bkd.jnp_prec),
+            vmap_m=jnp.array(self.vmap_m, dtype=jnp.int32),
+            vmap_p=jnp.array(self.vmap_p, dtype=jnp.int32),
+            bc_maps={
+                tag: jnp.array(map, dtype=bool) for tag, map in self.bc_maps.items()
+            },
+        )

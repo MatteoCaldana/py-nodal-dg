@@ -1,8 +1,7 @@
 import functools
 import math
 
-import pyndg.backend as bkd
-
+from pyndg import backend as bkd
 import pyndg.core.basis as basis
 import pyndg.core.la as la
 
@@ -165,10 +164,6 @@ class ReferenceElementOps:
                 for d in range(dim + 1)
             ]
         )
-
-        # - face mass matrix
-        # - lift
-        # - limiter/av stuff
 
     def build_interp_mat(self, rst_out):
         V_out = vandermonde(self.dim, self.N, rst_out)

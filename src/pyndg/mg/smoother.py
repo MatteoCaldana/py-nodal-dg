@@ -35,17 +35,18 @@ def chebyshev(Afn, b, x0, num_iters, lambda_min, lambda_max):
 
     return x
 
+
 def chebyshev_v2(A_fn, b, x, nu, lam_min, lam_max):
     theta = (lam_max + lam_min) / 2
     delta = (lam_max - lam_min) / 2
-    
+
     r = b - A_fn(x)
     u_hat = r / theta
     x = x + u_hat
-    
+
     if nu == 1:
         return x
-        
+
     rho_prev = 1.0
     for _ in range(2, nu + 1):
         rho = 1.0 / (2.0 * theta / delta - rho_prev)
@@ -53,7 +54,7 @@ def chebyshev_v2(A_fn, b, x, nu, lam_min, lam_max):
         u_hat = rho * (2.0 / delta * r + rho_prev * u_hat)
         x = x + u_hat
         rho_prev = rho
-        
+
     return x
 
 

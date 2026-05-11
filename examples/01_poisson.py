@@ -7,7 +7,7 @@ from pyndg.mg.cg import pcg, pcg_np
 from pyndg.mg.mg import build_prolongator_restrictor, mg_iter
 from pyndg.ops.meshops import MeshOps
 from pyndg.mesh.bc import BC
-from pyndg.physics.poisson import Poisson
+from pyndg.physics.poisson import Poisson, _block_assemble_kernel
 from pyndg.utils.plot import plot_2d
 import pyndg.backend
 
@@ -45,11 +45,14 @@ def rhs_fn(x, y):
 _A_CALLS = 0
 _P_CALLS = 0
 
+
 def reset_counters():
     global _A_CALLS, _P_CALLS
     _A_CALLS = 0
     _P_CALLS = 0
 
+
+import time
 
 if __name__ == "__main__":
     N = 10
@@ -58,10 +61,28 @@ if __name__ == "__main__":
     mesh_path = home_path / "mesh" / "gambit" / "circA01.neu"
 
     mesh = read_mesh(mesh_path)
-    mesh.build_bc({15: BC.Dirichlet})
+    mesh.face_tag = np.where(mesh.face_tag == 15, 1, mesh.face_tag)
     mesh_ops = MeshOps(mesh, N)
-    problem = Poisson({"penalty": 20.0}, mesh_ops)
+    params = {"penalty": 20.0, "bc_tags": {1: BC.Dirichlet}}
+    problem = Poisson(params, mesh_ops)
+
+    start_time = time.perf_counter()
     problem.assemble()
+    end_time = time.perf_counter()
+    print(f"Assemble time: {end_time - start_time:.3f} seconds")
+
+    mesh_dims, mesh_data = mesh_ops.build_mesh_data()
+
+    y = _block_assemble_kernel(
+        mesh_data, params["penalty"], mesh_dims
+    ).stiff.block_until_ready()
+    time_start = time.perf_counter()
+    for _ in range(10):
+        y = _block_assemble_kernel(
+            mesh_data, params["penalty"], mesh_dims
+        ).stiff.block_until_ready()
+    time_end = time.perf_counter()
+    print(f"Block assemble time: {(time_end - time_start) / 10:.3f} seconds")
 
     data = scipy.io.loadmat(PATH + f"Poisson2D_N{N}.mat")
     print(np.max(np.abs(problem.mass_mat - data["M"])))
@@ -76,14 +97,16 @@ if __name__ == "__main__":
         global _A_CALLS
         _A_CALLS += 1
         return problem.stiff_mat @ x
-    
+
     diag = problem.stiff_mat.diagonal()
+
     def P_jacobi(x):
         global _P_CALLS
         _P_CALLS += 1
         return x / diag
-    
+
     bdiag_inv = np.linalg.inv(problem.stiff[: mesh.K])
+
     def P_bjacobi(x):
         global _P_CALLS
         _P_CALLS += 1
@@ -113,7 +136,7 @@ if __name__ == "__main__":
     # multigrid
 
     mesh_ops_coarse = MeshOps(mesh, N - 3)
-    problem_coarse = Poisson({"penalty": 20.0}, mesh_ops_coarse)
+    problem_coarse = Poisson(params, mesh_ops_coarse)
     problem_coarse.assemble()
 
     P, R = build_prolongator_restrictor(mesh_ops_coarse, mesh_ops)
@@ -126,8 +149,10 @@ if __name__ == "__main__":
     uh = uh.reshape(mesh_ops.Np, mesh_ops.K, order="F")
 
     stiff_c = R @ (problem.stiff @ P)
+
+    # choice: asseble from blocks or use coarse stiffness matrix
     stiff_mat_c = problem.assemble_stiff_from_blocks(mesh_ops.mesh, stiff_c)
-    #stiff_mat_c = problem_coarse.stiff_mat
+    # stiff_mat_c = problem_coarse.stiff_mat
 
     smooth_iters = 1
     omega = 0.8
@@ -138,7 +163,6 @@ if __name__ == "__main__":
     )
     lambda_max = 1.1 * lambda_max
     lambda_min = 0.05 * lambda_max
-
 
     def sm_jacobi(AAfn, bb, xx):
         global _P_CALLS
@@ -154,37 +178,9 @@ if __name__ == "__main__":
         global _P_CALLS
         _P_CALLS += smooth_iters
         return bjacobi(AAfn, Db_inv, bb, xx, smooth_iters, omega=1.0)
-    
+
+    # choice: smoother
     smoother = sm_bjacobi
-
-    # uh_mg = np.zeros(uh.size)
-    # for it in range(1000):
-    #     uh_mg = mg_iter(
-    #         Afn,
-    #         rhs_flat,
-    #         uh_mg,
-    #         smoother,
-    #         P,
-    #         R,
-    #         stiff_mat_c,
-    #     )
-    #     res = rhs_flat - problem.stiff_mat @ uh_mg
-    #     res_norm = np.linalg.norm(res)
-    #     print(f"MG iter {it}, residual norm:", res_norm)
-    #     if res_norm < 1e-8:
-    #         break
-    
-    # res = rhs_flat - problem.stiff_mat @ uh_mg
-    # print("Residual (MG)", np.linalg.norm(res))
-
-    # uh_mg = uh_mg.reshape(mesh_ops.Np, mesh_ops.K, order="F")
-    # print("Diff with ref (MG)", np.max(np.abs(uh_mg - uh)))
-    
-    # - mg iteration
-    # - mg solver
-    # - mg as preconditioner for CG
-
-    ##########################################################################
 
     def mg_prec(rhs):
         x0 = np.zeros_like(rhs)
@@ -234,12 +230,3 @@ if __name__ == "__main__":
 
     plot_2d(mesh_ops, uh)
     plot_2d(mesh_ops, uh_mg)
-
-    # TODO:
-    # - multigrid solver
-    # - jax sparse utils
-    # - convergence test (p and h)
-    # - 3D, correctness check + benchmarks
-    # - jax.scan assembly loop
-    # - h-refinement grid
-    # - local h-refinement ?

@@ -150,7 +150,7 @@ def mesh_reader_gambit(file_name):
 
     if NBSETS == 0:
         # No boundary conditions specified, return early
-        return VXY, K, Nv, EToV, None, None, None
+        return VXY, EToV, None, None, None
 
     # Fill Boundary Condition array
     bc_type = np.zeros((K, NDFCD + 1), dtype=int)

@@ -325,6 +325,94 @@ def check_mesh_orientation(V, e2v):
     return check_mesh_orientation_fns[V.shape[1] - 1](V, e2v)
 
 
+def compute_inradius_2d(vxyz, e2v):
+    p1, p2, p3 = vxyz[e2v[:, 0]], vxyz[e2v[:, 1]], vxyz[e2v[:, 2]]
+    a = np.linalg.norm(p2 - p1, axis=1)
+    b = np.linalg.norm(p3 - p2, axis=1)
+    c = np.linalg.norm(p1 - p3, axis=1)
+    s = 0.5 * (a + b + c)
+    assert np.all(s > 0), "Invalid triangle with zero or negative semiperimeter."
+    area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+    inradius = area / s
+    return inradius
+
+
+def compute_inradius_3d(vxyz, e2v):
+    """
+    Compute insphere radius for tetrahedra.
+
+    Parameters
+    ----------
+    vxyz : (N,3) array
+        Vertex coordinates.
+    e2v : (M,4) array
+        Tetrahedron vertex indices.
+
+    Returns
+    -------
+    r : (M,) array
+        Inradius of each tetrahedron.
+    """
+
+    p1 = vxyz[e2v[:, 0]]
+    p2 = vxyz[e2v[:, 1]]
+    p3 = vxyz[e2v[:, 2]]
+    p4 = vxyz[e2v[:, 3]]
+
+    # --- tetrahedron volume ---
+    v = np.abs(np.einsum("ij,ij->i", p2 - p1, np.cross(p3 - p1, p4 - p1))) / 6.0
+
+    # --- triangle face areas ---
+    def tri_area(a, b, c):
+        return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+    A1 = tri_area(p1, p2, p3)
+    A2 = tri_area(p1, p2, p4)
+    A3 = tri_area(p1, p3, p4)
+    A4 = tri_area(p2, p3, p4)
+
+    surface_area = A1 + A2 + A3 + A4
+
+    # --- insphere radius ---
+    r = np.divide(3.0 * v, surface_area, out=np.zeros_like(v), where=surface_area > 0)
+
+    return r
+
+
+def compute_inradius_1d(vx, e2v):
+    """
+    Compute inradius for 1D elements (line segments).
+
+    Parameters
+    ----------
+    vx : (N,) or (N,d) array
+        Vertex coordinates.
+    e2v : (M,2) array
+        Segment vertex indices.
+
+    Returns
+    -------
+    r : (M,) array
+        Inradius of each segment.
+    """
+
+    p1 = vx[e2v[:, 0]]
+    p2 = vx[e2v[:, 1]]
+
+    length = np.linalg.norm(p2 - p1, axis=-1)
+
+    return 0.5 * length
+
+
+def compute_inradius(v, e2v):
+    compute_inradius_fns = [
+        compute_inradius_1d,
+        compute_inradius_2d,
+        compute_inradius_3d,
+    ]
+    return compute_inradius_fns[v.shape[1] - 1](v, e2v)
+
+
 class Mesh:
     def __init__(self, vxyz, e2v, b_faces, per_b2b, per_bf2f):
         self.vxyz = vxyz
@@ -343,6 +431,10 @@ class Mesh:
         self.connectivity_edges = list_connectivity_edges(self.e2e)
         self._build_connectivity_edges_map()
         reorder_cells(self.connectivity_edges, self.K)
+        self._compute_inradius()
+
+    def _compute_inradius(self):
+        self.inradius = compute_inradius(self.vxyz, self.e2v)
 
     def _build_connectivity_edges_map(self):
         self.connectivity_edges_map = {}
@@ -353,14 +445,6 @@ class Mesh:
 
     def get_cell_couple_id(self, cell_id1, cell_id2):
         return self.connectivity_edges_map[(cell_id1, cell_id2)]
-
-    def build_bc(self, map_bc):
-        assert (
-            0 not in map_bc or map_bc[0] == BC.NoneType
-        ), "Tag 0 is reserved for untagged faces and cannot be used for boundary conditions."
-
-        for key, value in map_bc.items():
-            self.face_tag[self.face_tag == key] = value
 
     def plot(self, show_elem_id=True, show_vtx_id=True):
         if self.dim == 2:
