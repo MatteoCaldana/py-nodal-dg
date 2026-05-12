@@ -4,6 +4,7 @@ import numpy as np
 import scipy.sparse
 import operator
 from functools import reduce
+from functools import partial
 
 from pyndg.mesh.bc import BC
 import pyndg.backend as bkd
@@ -36,7 +37,7 @@ def _hinv_kernel(mesh_data):
     return jnp.maximum(fscale_self, fscale_neigh)  # (K, Nf)
 
 
-@jax.jit(static_argnames=["Nfp"])
+@partial(jax.jit, static_argnames=["Nfp"])
 def _Dnormal_kernel(mesh_data, Dxyz, Nfp):
     # nxyz : (ndim, Nf*Nfp, K) — take first node of each face as the normal
     lnxyz = mesh_data.nxyz[:, ::Nfp, :]  # (ndim, Nf, K)
@@ -54,7 +55,7 @@ _COEFS = jnp.asarray(
 )
 
 
-@jax.jit(static_argnames=["Nf", "Np"])
+@partial(jax.jit, static_argnames=["Nf", "Np"])
 def _coupling_assemble_kernel(mesh_data, Dn, stiff_self, gtau, cids, K, Nf, Np):
     def _assemble_elem_kernel(cid):
         stiff_loc = stiff_self[cid]
@@ -166,11 +167,16 @@ class Poisson:
 
             # global stiff
             Jmat = ops.J_rst_xyz[:, :, cid]
-            Dx = Jmat[0, 0] * ref_ops.Dphi[0] + Jmat[1, 0] * ref_ops.Dphi[1]
-            Dy = Jmat[0, 1] * ref_ops.Dphi[0] + Jmat[1, 1] * ref_ops.Dphi[1]
+            Dxyz = [0] * dim
+            for d1 in range(dim):
+                for d2 in range(dim):
+                    Dxyz[d1] += Jmat[d2, d1] * ref_ops.Dphi[d2]
 
-            self.stiff[cid] = ops.J[cid] * (
-                Dx.T @ ref_ops.int_phiphi @ Dx + Dy.T @ ref_ops.int_phiphi @ Dy
+            Dx = Dxyz[0]
+            Dy = Dxyz[1]
+
+            self.stiff[cid] = ops.J[cid] * sum(
+                [Dxyz[d].T @ ref_ops.int_phiphi @ Dxyz[d] for d in range(dim)]
             )
 
             # face loop
@@ -181,7 +187,7 @@ class Poisson:
                 Fm1 = ops.vmap_m[lfid, :, cid] // K
                 Fm2 = ops.vmap_p[lfid, :, cid] // K
 
-                lnx, lny = ops.nxyz[:, lfid * Nfp, cid]
+                ln = ops.nxyz[:, lfid * Nfp, cid]
                 lsJ = ops.sJ[lfid, 0, cid]
 
                 hinv = ops.fscale[[lfid, nlfid], 0, [cid, ncid]].max()
@@ -193,7 +199,7 @@ class Poisson:
                 idx = np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])
                 mmE[idx] = lsJ * ref_ops.face_int_phiphi[lfid]
                 # Derivative operators
-                Dn1 = lnx * Dx + lny * Dy
+                Dn1 = sum([ln[d] * Dxyz[d] for d in range(dim)])
 
                 bc_type = self.bc_tags_map[mesh.face_tag[cid, lfid]]
 
@@ -209,13 +215,11 @@ class Poisson:
                         self.stiff[cid] += 0.5 * (gtau * mmE - mmE @ Dn1 - Dn1.T @ mmE)
 
                         Jmat = ops.J_rst_xyz[:, :, ncid]
-                        Dx2 = (
-                            Jmat[0, 0] * ref_ops.Dphi[0] + Jmat[1, 0] * ref_ops.Dphi[1]
-                        )
-                        Dy2 = (
-                            Jmat[0, 1] * ref_ops.Dphi[0] + Jmat[1, 1] * ref_ops.Dphi[1]
-                        )
-                        Dn2 = lnx * Dx2 + lny * Dy2
+                        Dxyz2 = [0] * dim
+                        for d1 in range(dim):
+                            for d2 in range(dim):
+                                Dxyz2[d1] += Jmat[d2, d1] * ref_ops.Dphi[d2]
+                        Dn2 = sum([ln[d] * Dxyz2[d] for d in range(dim)])
 
                         # coupling term
                         loc_stiff = np.zeros((Np, Np))
