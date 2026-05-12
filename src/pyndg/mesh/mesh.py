@@ -428,6 +428,10 @@ class Mesh:
 
         self.e2e, self.e2f, self.f2e = build_e2e_e2f(e2v)
 
+        if self.face_tag is None:
+            print("WARNING: mesh has no face tags, all BC set to 1.")
+            self.face_tag = (self.e2e == np.arange(self.K)[:, None]).astype(int)
+
         self.connectivity_edges = list_connectivity_edges(self.e2e)
         self._build_connectivity_edges_map()
         reorder_cells(self.connectivity_edges, self.K)
@@ -437,11 +441,32 @@ class Mesh:
         self.inradius = compute_inradius(self.vxyz, self.e2v)
 
     def _build_connectivity_edges_map(self):
-        self.connectivity_edges_map = {}
-        n_egdes = self.connectivity_edges.shape[0]
-        for idx, (cell_id1, cell_id2) in enumerate(self.connectivity_edges):
-            self.connectivity_edges_map[(cell_id1, cell_id2)] = idx
-            self.connectivity_edges_map[(cell_id2, cell_id1)] = idx + n_egdes
+        n_edges = self.connectivity_edges.shape[0]
+        src = self.connectivity_edges[:, 0]
+        dst = self.connectivity_edges[:, 1]
+        idx = np.arange(n_edges)
+        rows = np.concatenate([src, dst])
+        cols = np.concatenate([dst, src])
+        data = np.concatenate([idx, idx + n_edges])
+        self.connectivity_edges_map = csr_matrix(
+            (data, (rows, cols)), shape=(self.K, self.K), dtype=np.int64
+        )
+
+        cid = np.repeat(np.arange(self.K), self.dim + 1)
+        lfid = np.tile(np.arange(self.dim + 1), self.K)
+
+        ncid = self.e2e[cid, lfid]
+
+        mask = ncid != cid
+        cid = cid[mask]
+        lfid = lfid[mask]
+        ncid = ncid[mask]
+
+        edge_ids = self.connectivity_edges_map[cid, ncid].A1
+
+        self.eid2ef = np.full((2, n_edges * 2), -1, dtype=np.int64)
+        self.eid2ef[0, edge_ids] = cid
+        self.eid2ef[1, edge_ids] = lfid
 
     def get_cell_couple_id(self, cell_id1, cell_id2):
         return self.connectivity_edges_map[(cell_id1, cell_id2)]

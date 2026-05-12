@@ -1,6 +1,3 @@
-from typing import NamedTuple
-from xml.etree.ElementPath import ops
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -9,107 +6,117 @@ import operator
 from functools import reduce
 
 from pyndg.mesh.bc import BC
-from pyndg.ops.meshops import MeshData
+import pyndg.backend as bkd
 
 
-class PoissonData(NamedTuple):
-    penalty: float
-    stiff: jax.Array
-    stiff_coupling: jax.Array
-    mass: jax.Array
+@jax.jit
+def _mass_kernel(mesh_data):
+    def compute_element(j_val):
+        return j_val * mesh_data.int_phiphi
+
+    return jax.vmap(compute_element)(mesh_data.J)
 
 
-@jax.jit(static_argnames=["dims"])
-def _block_assemble_kernel(mesh_data, penalty, dims):
-    class CarryData(NamedTuple):
-        mdata: MeshData
-        pdata: PoissonData
+@jax.jit
+def _Dxyz_kernel(mesh_data):
+    return jnp.einsum("rdk,rij->dkij", mesh_data.J_rst_xyz, mesh_data.Dphi)
 
-    data = CarryData(
-        mdata=mesh_data,
-        pdata=PoissonData(
-            penalty=penalty,
-            stiff=jnp.zeros((dims.K, dims.Np, dims.Np)),
-            stiff_coupling=jnp.zeros((dims.K, dims.Nf, dims.Np, dims.Np)),
-            mass=jnp.zeros((dims.K, dims.Np, dims.Np)),
-        ),
+
+@jax.jit
+def _stiff_self_kernel(mesh_data, Dxyz):
+    return jnp.einsum(
+        "k,dkji,jm,dkml->kil", mesh_data.J, Dxyz, mesh_data.int_phiphi, Dxyz
     )
 
-    Np = dims.Np
 
-    def _dirichlet(mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2):
-        return gtau * mmE - mmE @ Dn1 - Dn1.T @ mmE, jnp.zeros((Np, Np))
+@jax.jit
+def _hinv_kernel(mesh_data):
+    fscale_self = mesh_data.fscale[:, 0, :].T  # (K, Nf)
+    fscale_neigh = mesh_data.fscale[mesh_data.e2f, 0, mesh_data.e2e]  # (K, Nf)
+    return jnp.maximum(fscale_self, fscale_neigh)  # (K, Nf)
 
-    def _neumann(mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2):
-        return jnp.zeros((Np, Np)), jnp.zeros((Np, Np))
 
-    def _interior(mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2):
-        Jmat = mesh_data.J_rst_xyz[:, :, ncid]
-        Dx2 = Jmat[0, 0] * mesh_data.Dphi[0] + Jmat[1, 0] * mesh_data.Dphi[1]
-        Dy2 = Jmat[0, 1] * mesh_data.Dphi[0] + Jmat[1, 1] * mesh_data.Dphi[1]
-        Dn2 = lnx * Dx2 + lny * Dy2
+@jax.jit(static_argnames=["Nfp"])
+def _Dnormal_kernel(mesh_data, Dxyz, Nfp):
+    # nxyz : (ndim, Nf*Nfp, K) — take first node of each face as the normal
+    lnxyz = mesh_data.nxyz[:, ::Nfp, :]  # (ndim, Nf, K)
+    return jnp.einsum("dfk,dkij->kfij", lnxyz, Dxyz)  # (K, Nf, Np, Np)
 
-        loc_stiff = jnp.zeros((Np, Np))
-        loc_stiff = loc_stiff.at[:, Fm2].add(-0.5 * gtau * mmE[:, Fm1])
-        loc_stiff = loc_stiff.at[Fm1, :].add(
-            -0.5 * mmE[jnp.ix_(Fm1, Fm1)] @ Dn2[Fm2, :]
-        )
-        loc_stiff = loc_stiff.at[:, Fm2].add(0.5 * (Dn1.T @ mmE[:, Fm1]))
 
-        return 0.5 * (gtau * mmE - mmE @ Dn1 - Dn1.T @ mmE), loc_stiff
+_COEFS = jnp.asarray(
+    [
+        # loc_ff  loc_row  loc_col  neigh_ff neigh_row neigh_col
+        [0.5, -0.5, -0.5, -0.5, -0.5, 0.5],  # interior
+        [1.0, -1.0, -1.0, +0.0, +0.0, 0.0],  # dirichlet
+        [0.0, +0.0, +0.0, +0.0, +0.0, 0.0],  # neumann
+    ],
+    dtype=bkd.jnp_prec,
+)
 
-    branches = [_interior, _dirichlet, _neumann]
 
-    def _assemble_elem_kernel(data, cid):
-        mesh_data = data.mdata
-        data.pdata.mass.at[cid].set(mesh_data.J[cid] * mesh_data.int_phiphi)
+@jax.jit(static_argnames=["Nf", "Np"])
+def _coupling_assemble_kernel(mesh_data, Dn, stiff_self, gtau, cids, K, Nf, Np):
+    def _assemble_elem_kernel(cid):
+        stiff_loc = stiff_self[cid]
+        stiff_neigh = jnp.zeros((Nf, Np, Np), dtype=bkd.jnp_prec)
+        for lfid in range(Nf):
+            ncid = mesh_data.e2e[cid, lfid]
+            nlfid = mesh_data.e2f[cid, lfid]
 
-        # global stiff
-        Jmat = mesh_data.J_rst_xyz[:, :, cid]
-        Dx = Jmat[0, 0] * mesh_data.Dphi[0] + Jmat[1, 0] * mesh_data.Dphi[1]
-        Dy = Jmat[0, 1] * mesh_data.Dphi[0] + Jmat[1, 1] * mesh_data.Dphi[1]
+            Fm1 = mesh_data.vmap_m[lfid, :, cid] // K
+            Fm2 = mesh_data.vmap_p[lfid, :, cid] // K
 
-        data.pdata.stiff.at[cid].set(
-            mesh_data.J[cid]
-            * (Dx.T @ mesh_data.int_phiphi @ Dx + Dy.T @ mesh_data.int_phiphi @ Dy)
-        )
+            gamma = gtau[cid, lfid]
 
-        # face loop
-        for lfid in range(dims.dim):  # lfid = local face id
-            ncid = mesh_data.e2e[cid, lfid]  # neigh cell id
-            nlfid = mesh_data.e2f[cid, lfid]  # neigh local face id
-
-            Fm1 = mesh_data.vmap_m[lfid, :, cid] // dims.K
-            Fm2 = mesh_data.vmap_p[lfid, :, cid] // dims.K
-
-            lnx, lny = mesh_data.nxyz[:, lfid * dims.Nfp, cid]
-            lsJ = mesh_data.sJ[lfid, 0, cid]
-
-            hinv = jnp.max(mesh_data.fscale[[lfid, nlfid], 0, cid])
-
-            # Penalty parameter
-            gtau = data.pdata.penalty * (dims.N + 1) * (dims.N + 1) * hinv
-            # Scaled face mass matrix
-            mmE = jnp.zeros_like(Dx)
-            mmE.at[jnp.ix_(mesh_data.fmasks[lfid], mesh_data.fmasks[lfid])].set(
-                lsJ * mesh_data.face_int_phiphi[lfid]
-            )
-            # Derivative operators
-            Dn1 = lnx * Dx + lny * Dy
+            mmE = mesh_data.sJ[lfid, 0, cid] * mesh_data.face_int_phiphi[lfid]
+            Dn1_f = Dn[cid, lfid][Fm1, :]  # (Nfp, Np)
+            Dn2_f = -Dn[ncid, nlfid][Fm2, :]  # (Nfp, Np)
 
             tag = mesh_data.face_tag[cid, lfid]
+            coef = _COEFS[tag]
 
-            dstiff, cstiff = jax.lax.switch(
-                tag, branches, mesh_data, lnx, lny, ncid, gtau, mmE, Dn1, Fm1, Fm2
+            Adn1 = mmE @ Dn1_f
+            Dn1tA = Dn1_f.T @ mmE
+            Adn2 = mmE @ Dn2_f
+
+            stiff_loc = stiff_loc.at[Fm1[:, None], Fm1].add(coef[0] * gamma * mmE)
+            stiff_loc = stiff_loc.at[Fm1, :].add(coef[1] * Adn1)
+            stiff_loc = stiff_loc.at[:, Fm1].add(coef[2] * Dn1tA)
+
+            stiff_neigh = stiff_neigh.at[lfid, Fm1[:, None], Fm2].add(
+                coef[3] * gamma * mmE
             )
+            stiff_neigh = stiff_neigh.at[lfid, Fm1, :].add(coef[4] * Adn2)
+            # Does not preserve axis order under scatter/gather lowering.
+            # Advanced-index dimensions get moved to the front.
+            stiff_neigh = stiff_neigh.at[lfid, :, Fm2].add(coef[5] * Dn1tA.T)
 
-            data.pdata.stiff.at[cid].add(dstiff)
-            data.pdata.stiff_coupling.at[cid, lfid].add(cstiff)
+        return stiff_loc, stiff_neigh
 
-        return data, None
+    assemble_fn = jax.jit(jax.vmap(_assemble_elem_kernel))
+    stiff, stiff_coupling = assemble_fn(cids)
+    return stiff, stiff_coupling
 
-    data, _ = jax.lax.scan(_assemble_elem_kernel, data, jnp.arange(dims.K))
-    return data.pdata
+
+@jax.jit
+def _flatten_blocks(mesh_data, stiff, stiff_coupling):
+    idxs = mesh_data.eid2ef
+    stiff = jnp.concatenate([stiff, stiff_coupling[idxs[0], idxs[1]]])
+    return stiff
+
+
+def block_assemble_kernel(mesh_data, penalty, dims):
+    mass = _mass_kernel(mesh_data)
+    Dxyz = _Dxyz_kernel(mesh_data)
+    Dn = _Dnormal_kernel(mesh_data, Dxyz, dims.Nfp)
+    hinv = _hinv_kernel(mesh_data)
+    gtau = penalty * (dims.N + 1) * (dims.N + 1) * hinv
+    stiff_self = _stiff_self_kernel(mesh_data, Dxyz)
+    stiff, stiff_coupling = _coupling_assemble_kernel(
+        mesh_data, Dn, stiff_self, gtau, jnp.arange(dims.K), dims.K, dims.Nf, dims.Np
+    )
+    stiff = _flatten_blocks(mesh_data, stiff, stiff_coupling)
+    return mass, stiff
 
 
 class Poisson:
@@ -176,15 +183,15 @@ class Poisson:
 
                 lnx, lny = ops.nxyz[:, lfid * Nfp, cid]
                 lsJ = ops.sJ[lfid, 0, cid]
-                hinv = max(ops.fscale[lfid, 0, cid], ops.fscale[nlfid, 0, ncid])
+
+                hinv = ops.fscale[[lfid, nlfid], 0, [cid, ncid]].max()
 
                 # Penalty parameter
                 gtau = self.tau * (N + 1) * (N + 1) * hinv
                 # Scaled face mass matrix
-                mmE = np.zeros_like(Dx)
-                mmE[np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])] = (
-                    lsJ * ref_ops.face_int_phiphi[lfid]
-                )
+                mmE = np.zeros((Np, Np))
+                idx = np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])
+                mmE[idx] = lsJ * ref_ops.face_int_phiphi[lfid]
                 # Derivative operators
                 Dn1 = lnx * Dx + lny * Dy
 

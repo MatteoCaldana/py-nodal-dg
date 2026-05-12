@@ -21,8 +21,8 @@ class MeshData(NamedTuple):
     e2e: jax.Array
     e2f: jax.Array
     face_tag: jax.Array
-    connectivity_edge_map: dict
     connectivity_edges: jax.Array
+    eid2ef: jax.Array
     # reference element data
     rst: jax.Array
     V: jax.Array
@@ -211,8 +211,8 @@ class MeshOps:
         ), MeshData(
             e2e=jnp.array(self.mesh.e2e, dtype=jnp.int32),
             e2f=jnp.array(self.mesh.e2f, dtype=jnp.int32),
+            eid2ef=jnp.array(self.mesh.eid2ef, dtype=jnp.int32),
             face_tag=jnp.array(self.mesh.face_tag, dtype=jnp.int32),
-            connectivity_edge_map=self.mesh.connectivity_edges_map,
             connectivity_edges=jnp.array(self.mesh.connectivity_edges, dtype=jnp.int32),
             rst=jnp.array(self.ref_elem_ops.rst, dtype=bkd.jnp_prec),
             V=jnp.array(self.ref_elem_ops.V, dtype=bkd.jnp_prec),
