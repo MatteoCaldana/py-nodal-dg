@@ -5,7 +5,7 @@ from pyndg.mg.mg import build_prolongator_restrictor, mg_iter
 from pyndg.ops.meshops import MeshOps
 from pyndg.mesh.bc import BC
 from pyndg.mesh.mesh import Mesh
-from pyndg.physics.poisson import Poisson, block_assemble_kernel
+from pyndg.physics.poisson import Poisson, block_assemble_kernel, block_assemble_kernel_v2
 from pyndg.utils.plot import plot_2d
 
 from pathlib import Path
@@ -24,22 +24,22 @@ np.set_printoptions(linewidth=np.inf)
 freq = 1.0
 
 
-def sol_fn(x, y):
-    return np.sin(freq * np.pi * x) * np.sin(freq * np.pi * y)
+def sol_fn(xyz):
+    return np.prod(np.sin(freq * np.pi * xyz), axis=0)
 
 
-def dir_fn(x, y):
-    return sol_fn(x, y)
+def dir_fn(xyz):
+    return sol_fn(xyz)
 
 
-def neu_fn(x, y):
-    un_x = freq * np.pi * np.cos(freq * np.pi * x) * np.sin(freq * np.pi * y)
-    un_y = freq * np.pi * np.sin(freq * np.pi * x) * np.cos(freq * np.pi * y)
-    return un_x, un_y
+def neu_fn(xyz):
+    k = freq * np.pi
+    u = sol_fn(xyz)
+    return tuple(k * u * (np.cos(k * xyz[i]) / np.sin(k * xyz[i])) for i in range(len(xyz)))
 
 
-def rhs_fn(x, y):
-    return 2 * freq * freq * np.pi * np.pi * sol_fn(x, y)
+def rhs_fn(xyz):
+    return xyz.shape[0] * freq * freq * np.pi * np.pi * sol_fn(xyz)
 
 
 _A_CALLS = 0
@@ -52,13 +52,82 @@ def reset_counters():
     _P_CALLS = 0
 
 
-def main_2d():
-    N = 10
+def triangular_mesh(l):
+    x = np.linspace(0.0, 1.0, l + 1)
+    y = np.linspace(0.0, 1.0, l + 1)
+
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    vxyz = np.column_stack([xx.ravel(), yy.ravel()])
+    e2v = []
+
+    def vid(i, j):
+        return i * (l + 1) + j
+
+    for i in range(l):
+        for j in range(l):
+
+            # square corners
+            v0 = vid(i,     j)
+            v1 = vid(i + 1, j)
+            v2 = vid(i + 1, j + 1)
+            v3 = vid(i,     j + 1)
+
+            # split square into two triangles
+            e2v.append([v0, v1, v2])
+            e2v.append([v0, v2, v3])
+
+    e2v = np.asarray(e2v, dtype=int)
+
+    return vxyz, e2v
+
+
+def main():
+    N = 1
 
     home_path = Path(__file__).resolve().parent.parent
     mesh_path = home_path / "mesh" / "gambit" / "cubeK86.neu"
 
     mesh = read_mesh(mesh_path)
+    mesh.face_tag = np.where(mesh.face_tag == 15, 1, mesh.face_tag)
+    mesh_ops = MeshOps(mesh, N)
+    params = {"penalty": 20.0, "bc_tags": {1: BC.Dirichlet}}
+    problem = Poisson(params, mesh_ops)
+
+    data = scipy.io.loadmat(PATH + f"Poisson{mesh.dim}D_N{N}.mat")
+
+    start_time = time.perf_counter()
+    problem.assemble()
+    rhs = problem.assemble_rhs(rhs_fn, dir_fn, neu_fn)
+    end_time = time.perf_counter()
+    print(f"Assemble time: {end_time - start_time:.3f} seconds")
+
+    print(f"Mass error: {np.max(np.abs(problem.mass_mat - data['M'])):.3e}")
+    print(f"Stif error: {np.max(np.abs(problem.stiff_mat - data['A'])):.3e}")
+    data["rhs"] = data["rhs"].flatten(order="C" if data["rhs"].shape[1] == 1 else "F") 
+    print(f"RHS error: {np.max(np.abs(rhs.flatten(order='F') - data["rhs"])):.3e}")
+
+    print(f"Solving {rhs.size}...")
+    uex = sol_fn(mesh_ops.xyz)
+    uh = scipy.sparse.linalg.spsolve(problem.stiff_mat, rhs.flatten(order="F"))
+    uh = uh.reshape(mesh_ops.Np, mesh_ops.K, order="F")
+
+    err = uh - uex
+    err = err.flatten(order="F")
+    err_l2 = np.sqrt(np.dot(err, problem.mass_mat @ err))
+    err_h1 = np.sqrt(np.dot(err, problem.stiff_mat @ err))
+    print(f"Error (LU): {err_l2:.3e} {err_h1:.3e}")
+
+
+def main_2d():
+    N = 7
+
+    home_path = Path(__file__).resolve().parent.parent
+    mesh_path = home_path / "mesh" / "gambit" / "circA01.neu"
+
+    mesh = read_mesh(mesh_path)
+
+
+    mesh = Mesh(*triangular_mesh(400), None, None, None)
     mesh.face_tag = np.where(mesh.face_tag == 15, 1, mesh.face_tag)
     mesh_ops = MeshOps(mesh, N)
     params = {"penalty": 20.0, "bc_tags": {1: BC.Dirichlet}}
@@ -78,7 +147,7 @@ def main_2d():
     time_end = time.perf_counter()
     print(f"JIT compile time: {time_end - time_start:.3f} seconds")
     time_start = time.perf_counter()
-    reps = 10
+    reps = 3
     for _ in range(reps):
         block_assemble_kernel(mesh_data, params["penalty"], mesh_dims)[
             1
@@ -88,7 +157,24 @@ def main_2d():
     jmass, jstiff = block_assemble_kernel(mesh_data, params["penalty"], mesh_dims)
     print(f"Mass error: {np.max(np.abs(np.array(jmass) - problem.mass)):.3e}")
     print(f"Stif error: {np.max(np.abs(np.array(jstiff) - problem.stiff)):.3e}")
-    
+
+    # time_start = time.perf_counter()
+    # block_assemble_kernel_v2(mesh_data, params["penalty"], mesh_dims)[1].block_until_ready()
+    # time_end = time.perf_counter()
+    # print(f"JIT Block assemble v2 time: {time_end - time_start:.3f} seconds")
+
+    # time_start = time.perf_counter()
+    # reps = 3
+    # for _ in range(reps):
+    #     block_assemble_kernel_v2(mesh_data, params["penalty"], mesh_dims)[1].block_until_ready()
+    # time_end = time.perf_counter()
+    # print(f"Block assemble v2 time: {(time_end - time_start) / reps:.3f} seconds")
+
+    # jmass2, jstiff2 = block_assemble_kernel_v2(mesh_data, params["penalty"], mesh_dims)
+
+    # print(f"Mass error (v2): {np.max(np.abs(np.array(jmass2) - problem.mass)):.3e}")
+    # print(f"Stif error (v2): {np.max(np.abs(np.array(jstiff2) - problem.stiff)):.3e}")
+
     return
 
     data = scipy.io.loadmat(PATH + f"Poisson2D_N{N}.mat")
@@ -241,63 +327,3 @@ def main_2d():
 
 if __name__ == "__main__":
     main_2d()
-    N = 10
-
-    home_path = Path(__file__).resolve().parent.parent
-    mesh_path = home_path / "mesh" / "gambit" / "cubeK86.neu"
-
-    # vertex positions: (Nv, 3)
-    vxyz = np.array([
-        [0.0, 0.0, 0.0],  # 0
-        [1.0, 0.0, 0.0],  # 1
-        [1.0, 1.0, 0.0],  # 2
-        [0.0, 1.0, 0.0],  # 3
-        [0.0, 0.0, 1.0],  # 4
-        [1.0, 0.0, 1.0],  # 5
-        [1.0, 1.0, 1.0],  # 6
-        [0.0, 1.0, 1.0],  # 7
-    ])
-
-    # tetrahedra connectivity: (K, 4)
-    # six-tet decomposition of the cube using body diagonal (0 -> 6)
-    e2v = np.array([
-        [0, 1, 2, 6],
-        [0, 2, 3, 6],
-        [0, 3, 7, 6],
-        [0, 7, 4, 6],
-        [0, 4, 5, 6],
-        [0, 5, 1, 6],
-    ], dtype=int)
-
-    mesh = Mesh(vxyz, e2v, None, None, None)
-    mesh_ops = MeshOps(mesh, N)
-    mesh_dims, mesh_data = mesh_ops.build_mesh_data()
-
-    params = {"penalty": 20.0, "bc_tags": {1: BC.Dirichlet}}
-    problem = Poisson(params, mesh_ops) 
-
-    time_start = time.perf_counter()
-    block_assemble_kernel(mesh_data, params["penalty"], mesh_dims)[
-        1
-    ].block_until_ready()
-    time_end = time.perf_counter()
-    print(f"JIT compile time: {time_end - time_start:.3f} seconds")
-    time_start = time.perf_counter()
-    reps = 10
-    for _ in range(reps):
-        block_assemble_kernel(mesh_data, params["penalty"], mesh_dims)[
-            1
-        ].block_until_ready()
-    time_end = time.perf_counter()
-    print(f"Block assemble time: {(time_end - time_start) / reps:.3f} seconds")
-
-
-    foo = lambda _: block_assemble_kernel(mesh_data, params["penalty"], mesh_dims)
-
-    time_start = time.perf_counter()
-    jax.vmap(foo)(jnp.arange(86//6))[1].block_until_ready()
-    time_end = time.perf_counter()
-    print(f"VMap time: {time_end - time_start:.3f} seconds")
-
-    # data = scipy.io.loadmat(PATH + f"Poisson3D_N{N}.mat")
-

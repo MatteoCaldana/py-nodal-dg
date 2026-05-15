@@ -93,6 +93,8 @@ class ReferenceElementOps:
         assert isinstance(dim, int) and dim in [1, 2, 3]
         assert isinstance(N, int) and N >= 1
 
+        print("Building reference element operators...")
+
         # degree of the polynomial approximation
         self.N = N
         # number of nodes in the reference element
@@ -164,6 +166,8 @@ class ReferenceElementOps:
                 for d in range(dim + 1)
             ]
         )
+
+        print("Reference element operators built")
 
     def build_interp_mat(self, rst_out):
         V_out = vandermonde(self.dim, self.N, rst_out)

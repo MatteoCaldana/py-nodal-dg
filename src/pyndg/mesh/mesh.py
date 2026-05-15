@@ -233,12 +233,8 @@ def check_mesh_orientation_2d(VXY, e2v):
     inverted = np.where(val < -tol)[0]
     degenerate = np.where(np.abs(val) <= tol)[0]
 
-    if len(inverted) == 0 and len(degenerate) == 0:
-        print("All triangles are properly oriented (CCW).")
-    else:
-        print(
-            f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate triangles."
-        )
+    if not (len(inverted) == 0 and len(degenerate) == 0):
+        print(f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate.")
 
     return inverted, degenerate
 
@@ -277,12 +273,8 @@ def check_mesh_orientation_3d(vxyz, e2v):
     inverted = np.where(val < -tol)[0]
     degenerate = np.where(np.abs(val) <= tol)[0]
 
-    if len(inverted) == 0 and len(degenerate) == 0:
-        print("All tetrahedra are properly oriented.")
-    else:
-        print(
-            f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate tetrahedra."
-        )
+    if not (len(inverted) == 0 and len(degenerate) == 0):
+        print(f"WARNING: {len(inverted)} inverted, {len(degenerate)} degenerate.")
 
     return inverted, degenerate
 
@@ -317,6 +309,7 @@ def check_mesh_orientation_1d(VX, e2v):
 
 
 def check_mesh_orientation(V, e2v):
+    print("   Checking mesh orientation...")
     check_mesh_orientation_fns = [
         check_mesh_orientation_1d,
         check_mesh_orientation_2d,
@@ -424,18 +417,25 @@ class Mesh:
         self.per_b2b = per_b2b
         self.per_bf2f = per_bf2f
 
+        print("Building mesh...")
         check_mesh_orientation(vxyz, e2v)
-
+        print("   Building connectivity maps...")
         self.e2e, self.e2f, self.f2e = build_e2e_e2f(e2v)
 
         if self.face_tag is None:
             print("WARNING: mesh has no face tags, all BC set to 1.")
             self.face_tag = (self.e2e == np.arange(self.K)[:, None]).astype(int)
 
+        print("   Building connectivity edges...")
         self.connectivity_edges = list_connectivity_edges(self.e2e)
+        print(f"   Building connectivity edges map...")
         self._build_connectivity_edges_map()
+        print("   Reordering cells to minimize bandwidth...")
         reorder_cells(self.connectivity_edges, self.K)
+        print("  Computing inradius...")
         self._compute_inradius()
+
+        print("Mesh initialized")
 
     def _compute_inradius(self):
         self.inradius = compute_inradius(self.vxyz, self.e2v)

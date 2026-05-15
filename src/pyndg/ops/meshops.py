@@ -1,3 +1,4 @@
+from pyndg.mesh.mesh import LOCAL_FACE_TO_VERTEX
 from pyndg.ops.refelem import REF_NORMALS, ReferenceElementOps
 import pyndg.backend as bkd
 
@@ -49,6 +50,16 @@ class MeshData(NamedTuple):
     bc_maps: dict[int, jax.Array]
 
 
+def find_permutation(a, b):
+    pa = np.argsort(a, kind='stable')
+    pb = np.argsort(b, kind='stable')
+
+    p = np.empty_like(pb)
+    p[pb] = pa
+
+    return p
+
+
 class MeshOps:
     def __init__(self, mesh, N):
         self.mesh = mesh
@@ -62,13 +73,20 @@ class MeshOps:
         self.Nfp = self.ref_elem_ops.Nfp
 
         self._build()
+        print("MeshOps initialized")
 
     def _build(self):
+        print("Building mesh nodes...")
         self._compute_nodes_coordiantes()
+        print("Building face nodes...")
         self._compute_face_coordinates()
+        print("Building geometric factors...")
         self._compute_geometric_factors()
+        print("Building normals...")
         self._compute_normals()
+        print("Building nodal maps...")
         self._compute_nodal_maps()
+        print("Building BC nodal maps...")
         self._compute_bc_nodal_maps()
 
     def _compute_nodes_coordiantes(self):
@@ -152,11 +170,8 @@ class MeshOps:
         # node map for the plus side, initialized as self-referential
         # usual convention that equality means boundary condition
         self.vmap_p = self.vmap_m.copy()
-
-        # reference element length, should be the shortest edge of each element,
-        # we set for an approximation assuming elements are not too distorted
-        bbox = np.max(self.mesh.vxyz, axis=0) - np.min(self.mesh.vxyz, axis=0)
-        refd = (np.prod(bbox) / self.K) ** (1 / self.dim)
+        permutations_cache = {}
+        lf2v = LOCAL_FACE_TO_VERTEX[self.dim]
         for cid in range(self.K):
             for lfid in range(self.dim + 1):
                 ncid = self.mesh.e2e[cid, lfid]
@@ -165,19 +180,32 @@ class MeshOps:
                 vid_m = self.vmap_m[lfid, :, cid]
                 # node ids for the neighboring face
                 vid_p = self.vmap_m[nlfid, :, ncid]
-                # to find out if there is any permutation, we compare coordinates
-                xyz_m = self.xyz.reshape(self.dim, -1)[:, vid_m]
-                xyz_p = self.xyz.reshape(self.dim, -1)[:, vid_p]
-                d2 = sum(
-                    [
-                        np.subtract.outer(xyz_m[d], xyz_p[d]) ** 2
-                        for d in range(self.dim)
-                    ]
-                )
-                id_m, id_p = np.where(np.sqrt(d2) < 1e-8 * refd)
-                assert id_m.size == self.Nfp and id_p.size == self.Nfp
-                self.vmap_p[lfid, id_m, cid] = vid_p[id_p]
 
+                vf = self.mesh.e2v[cid, lf2v[lfid]]
+                nvf = self.mesh.e2v[ncid, lf2v[nlfid]]
+                key = (lfid, nlfid, *find_permutation(vf, nvf))
+
+                if key in permutations_cache:
+                    # if we already computed the permutation for this pair of faces, we can reuse it
+                    id_p = permutations_cache[key]
+                else:
+                    # to find out if there is any permutation, we compare coordinates
+                    xyz_m = self.xyz.reshape(self.dim, -1)[:, vid_m]
+                    xyz_p = self.xyz.reshape(self.dim, -1)[:, vid_p]
+                    d2 = sum(
+                        [
+                            np.subtract.outer(xyz_m[d], xyz_p[d]) ** 2
+                            for d in range(self.dim)
+                        ]
+                    )
+                    id_m, id_p = np.where(np.sqrt(d2) < 1e-8 * np.sqrt(d2.max()))
+                    assert id_m.size == self.Nfp and id_p.size == self.Nfp
+                    assert (id_m == np.arange(self.Nfp)).all()
+                    permutations_cache[key] = id_p
+
+                self.vmap_p[lfid, :, cid] = vid_p[id_p]
+
+        print("Cache size:", len(permutations_cache)    )
         # TODO: compute vmap_p, taking into account periodicity and boundary conditions
         print(
             "WARNING: vmap_p periodicity and boundary conditions not implemented yet."

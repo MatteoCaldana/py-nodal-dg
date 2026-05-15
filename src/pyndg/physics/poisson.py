@@ -106,6 +106,55 @@ def _flatten_blocks(mesh_data, stiff, stiff_coupling):
     return stiff
 
 
+@partial(jax.jit, static_argnames=["dim", "Nf", "Np"])
+def _stiff_asseble_step_kernel(
+    J,
+    Dxyz,
+    mass,
+    gtau,
+    sJ,
+    face_int_phiphi,
+    Dn1,
+    Dn2,
+    Fm1s,
+    Fm2s,
+    face_tag,
+    dim,
+    Nf,
+    Np,
+):
+    print("Assembling stiffness for one element...")
+    stiff = J * sum([Dxyz[d].T @ mass @ Dxyz[d] for d in range(dim)])
+    stiff_neigh = jnp.zeros((Nf, Np, Np), dtype=bkd.jnp_prec)
+    for lfid in range(Nf):
+        gamma = gtau[lfid]
+        Fm1 = Fm1s[lfid]
+        Fm2 = Fm2s[lfid]
+
+        mmE = sJ[lfid] * face_int_phiphi[lfid]
+        Dn1_f = Dn1[lfid][Fm1, :]
+        Dn2_f = -Dn2[lfid][Fm2, :]
+
+        tag = face_tag[lfid]
+        coef = _COEFS[tag]
+
+        Adn1 = mmE @ Dn1_f
+        Dn1tA = Dn1_f.T @ mmE
+        Adn2 = mmE @ Dn2_f
+
+        stiff = stiff.at[Fm1[:, None], Fm1].add(coef[0] * gamma * mmE)
+        stiff = stiff.at[Fm1, :].add(coef[1] * Adn1)
+        stiff = stiff.at[:, Fm1].add(coef[2] * Dn1tA)
+
+        stiff_neigh = stiff_neigh.at[lfid, Fm1[:, None], Fm2].add(coef[3] * gamma * mmE)
+        stiff_neigh = stiff_neigh.at[lfid, Fm1, :].add(coef[4] * Adn2)
+        # Does not preserve axis order under scatter/gather lowering.
+        # Advanced-index dimensions get moved to the front.
+        stiff_neigh = stiff_neigh.at[lfid, :, Fm2].add(coef[5] * Dn1tA.T)
+
+    return stiff, stiff_neigh
+
+
 def block_assemble_kernel(mesh_data, penalty, dims):
     mass = _mass_kernel(mesh_data)
     Dxyz = _Dxyz_kernel(mesh_data)
@@ -118,6 +167,40 @@ def block_assemble_kernel(mesh_data, penalty, dims):
     )
     stiff = _flatten_blocks(mesh_data, stiff, stiff_coupling)
     return mass, stiff
+
+
+def block_assemble_kernel_v2(mesh_data, penalty, dims):
+    mass = _mass_kernel(mesh_data)
+    Dxyz = _Dxyz_kernel(mesh_data)
+    Dn = _Dnormal_kernel(mesh_data, Dxyz, dims.Nfp)
+    hinv = _hinv_kernel(mesh_data)
+    gtau = penalty * (dims.N + 1) * (dims.N + 1) * hinv
+
+    stiff, stiff_coupling = [], []
+    for cid in range(dims.K):
+        ncid = mesh_data.e2e[cid, 0]
+        nlfid = mesh_data.e2f[cid, :]
+        tmp1, tmp2 = _stiff_asseble_step_kernel(
+            mesh_data.J[cid],
+            Dxyz[:, cid],
+            mesh_data.int_phiphi,
+            gtau[cid],
+            mesh_data.sJ[:, 0, cid],
+            mesh_data.face_int_phiphi,
+            Dn[cid],
+            Dn[ncid, nlfid],
+            mesh_data.vmap_m[:, :, cid] // dims.K,
+            mesh_data.vmap_p[:, :, cid] // dims.K,
+            mesh_data.face_tag[:, cid],
+            dims.dim,
+            dims.Nf,
+            dims.Np,
+        )
+        stiff.append(tmp1)
+        stiff_coupling.append(tmp2)
+
+    stiff = _flatten_blocks(mesh_data, jnp.stack(stiff), jnp.stack(stiff_coupling))
+    return mass, mass
 
 
 class Poisson:
@@ -171,9 +254,6 @@ class Poisson:
             for d1 in range(dim):
                 for d2 in range(dim):
                     Dxyz[d1] += Jmat[d2, d1] * ref_ops.Dphi[d2]
-
-            Dx = Dxyz[0]
-            Dy = Dxyz[1]
 
             self.stiff[cid] = ops.J[cid] * sum(
                 [Dxyz[d].T @ ref_ops.int_phiphi @ Dxyz[d] for d in range(dim)]
@@ -307,47 +387,47 @@ class Poisson:
         Nfp = ops.Nfp
         K = mesh.K
         N = ops.N
+        Nf = ops.Nf
+        dim = ops.dim
 
         self.rhs = np.zeros((Np, K))
 
         # TODO: generalize to 3D
-        Fx = ops.fxyz[0]
-        Fy = ops.fxyz[1]
-
-        empty_bc = np.zeros_like(Fx, dtype=bool)
+        empty_bc = np.zeros((Nfp * Nf, K), dtype=bool)
 
         d_tags = self.bc_tags_map_rev.get(BC.Dirichlet, [])
         map_d = reduce(operator.or_, [ops.bc_maps[tag] for tag in d_tags], empty_bc)
-        self.u_dir = np.zeros_like(Fx)
-        self.u_dir[map_d] = dir_fn(Fx[map_d], Fy[map_d])
+        self.u_dir = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)
+        self.u_dir[map_d] = dir_fn(ops.fxyz[:, map_d])
         self.u_dir = self.u_dir.reshape(ops.Nf, Nfp, K)
 
         n_tags = self.bc_tags_map_rev.get(BC.Neumann, [])
         map_n = reduce(operator.or_, [ops.bc_maps[tag] for tag in n_tags], empty_bc)
-        un_x, un_y = neu_fn(Fx[map_n], Fy[map_n])
-        self.u_neu = np.zeros_like(Fx)
-        self.u_neu[map_n] = ops.nxyz[0, map_n] * un_x + ops.nxyz[1, map_n] * un_y
+        dudxyz = neu_fn(ops.fxyz[:, map_n])
+        self.u_neu = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)
+        self.u_neu[map_n] = sum([ops.nxyz[d, map_n] * dudxyz[d] for d in range(dim)])
         self.u_neu = self.u_neu.reshape(ops.Nf, Nfp, K)
 
         for cid in range(K):
             Jmat = ops.J_rst_xyz[:, :, cid]
-            Dx = Jmat[0, 0] * ref_ops.Dphi[0] + Jmat[1, 0] * ref_ops.Dphi[1]
-            Dy = Jmat[0, 1] * ref_ops.Dphi[0] + Jmat[1, 1] * ref_ops.Dphi[1]
-            for lfid in range(3):
+            Dxyz = [0] * dim
+            for d1 in range(dim):
+                for d2 in range(dim):
+                    Dxyz[d1] += Jmat[d2, d1] * ref_ops.Dphi[d2]
+            for lfid in range(Nf):
                 Fm1 = ops.vmap_m[lfid, :, cid] // K
-                lnx, lny = ops.nxyz[:, lfid * Nfp, cid]
+                ln = ops.nxyz[:, lfid * Nfp, cid]
                 lsJ = ops.sJ[lfid, 0, cid]
                 hinv = ops.fscale[lfid, 0, cid]
 
                 # Penalty parameter
                 gtau = self.tau * (N + 1) * (N + 1) * hinv
                 # Scaled face mass matrix
-                mmE = np.zeros_like(Dx)
-                mmE[np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])] = (
-                    lsJ * ref_ops.face_int_phiphi[lfid]
-                )
+                mmE = np.zeros((Np, Np))
+                idx = np.ix_(ref_ops.fmasks[lfid], ref_ops.fmasks[lfid])
+                mmE[idx] = lsJ * ref_ops.face_int_phiphi[lfid]
                 # Derivative operators
-                Dn1 = lnx * Dx + lny * Dy
+                Dn1 = sum([ln[d] * Dxyz[d] for d in range(dim)])
 
                 bc_type = self.bc_tags_map[mesh.face_tag[cid, lfid]]
                 match bc_type:
@@ -362,7 +442,7 @@ class Poisson:
                     case _:
                         raise NotImplementedError(f"Cannot handle BC {bc_type}")
 
-        rhs_vol = ref_ops.int_phiphi @ (rhs_fn(ops.xyz[0], ops.xyz[1]) * ops.J[None, :])
+        rhs_vol = ref_ops.int_phiphi @ (rhs_fn(ops.xyz) * ops.J[None, :])
         self.rhs += rhs_vol
 
         self.is_assembled_rhs = True
