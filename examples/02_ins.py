@@ -1,11 +1,22 @@
+import jax
+
 from pyndg.mesh import read_mesh
-from pyndg.ops.meshops import MeshOps
-from pyndg.physics.ins import IncompressibleNavierStokes
+from pyndg.ops.meshops import MeshOps, apply_bc_maps
+from pyndg.physics.ins import (
+    IncNavierStokesState,
+    IncompressibleNavierStokes,
+    _advection_step,
+    _viscous_step,
+    _pressure_step,
+    _update_bc,
+)
+from pyndg.mesh.bc import BC
 
 from pathlib import Path
 import scipy.io
 from scipy.sparse.linalg import spsolve_triangular
 import numpy as np
+import jax.numpy as jnp
 import time
 
 PATH = "/home/matteo/Documents/nodal-dg/Codes1.1/"
@@ -152,235 +163,8 @@ class Mesh:
                 setattr(self, var + "C", mapC)
 
 
-def ins2d_step(mesh, static_state, state):
-    temporal_scaling(static_state, state)
-    ins2d_advection(mesh, state, static_state)
-    ins2d_pressure(mesh, state, static_state)
-    ins2d_viscous(mesh, state, static_state)
-    state.time = state.tstep * state.dt
-    state.tstep += 1
-
-
-def temporal_scaling(static_state, state):
-    time = state.time
-    dt = state.dt
-
-    # Time factors
-    tfac = np.sin(np.pi * time / 8)
-    tfac1 = np.sin(np.pi * (time + dt) / 8)
-    tpfac = (np.pi / 8) * np.cos(np.pi * time / 8)
-    tpfac1 = (np.pi / 8) * np.cos(np.pi * time / 8)
-    tpfac2 = (np.pi / 8) * np.cos(np.pi * time / 8)
-
-    # Boundary condition calculations
-    state.bcUx = tfac * static_state.refbcUx
-    state.rhsbcUx = tfac1 * static_state.refrhsbcUx
-    state.bcUy = tfac * static_state.refbcUy
-    state.rhsbcUy = tfac1 * static_state.refrhsbcUy
-    state.bcPR = tpfac1 * static_state.refbcPR
-    state.rhsbcPR = tpfac2 * static_state.refrhsbcPR
-    state.bcdUndt = tpfac * static_state.refbcdUndt
-
-
-def Div2D(mesh, u, v):
-    ur = mesh.Dr @ u
-    us = mesh.Ds @ u
-    vr = mesh.Dr @ v
-    vs = mesh.Ds @ v
-    return mesh.rx * ur + mesh.sx * us + mesh.ry * vr + mesh.sy * vs
-
-
-def Curl2D(mesh, ux, uy):
-    uxr = mesh.Dr @ ux
-    uxs = mesh.Ds @ ux
-    uyr = mesh.Dr @ uy
-    uys = mesh.Ds @ uy
-    return mesh.rx * uyr + mesh.sx * uys - mesh.ry * uxr - mesh.sy * uxs
-
-
-def Grad2D(mesh, u):
-    ur = mesh.Dr @ u
-    us = mesh.Ds @ u
-
-    ux = mesh.rx * ur + mesh.sx * us
-    uy = mesh.ry * ur + mesh.sy * us
-    return ux, uy
-
-
 system_solve_time = 0
 system_solve_cnt = 0
-
-
-def ins2d_advection(mesh, state, ss):
-    # 1. Evaluate flux vectors
-    fxUx = state.Ux * state.Ux
-    fyUx = state.Ux * state.Uy
-    fxUy = state.Ux * state.Uy
-    fyUy = state.Uy * state.Uy
-
-    # 2. Save old nonlinear terms
-    NUxold = state.NUx.copy()
-    NUyold = state.NUy.copy()
-
-    # 3. Evaluate inner-product (Assuming Div2D is defined elsewhere in your Python code)
-    state.NUx = Div2D(mesh, fxUx, fyUx)
-    state.NUy = Div2D(mesh, fxUy, fyUy)
-
-    # 4. Interpolate velocity to face nodes
-    UxM = state.Ux.flat[mesh.vmapMC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
-    UyM = state.Uy.flat[mesh.vmapMC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
-    UxP = state.Ux.flat[mesh.vmapPC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
-    UyP = state.Uy.flat[mesh.vmapPC].reshape((mesh.Nfp * mesh.Nfaces, mesh.K))
-
-    # 5. Set '+' trace at boundary face nodes
-    UxP.flat[mesh.mapIC] = state.bcUx.flat[mesh.mapIC]
-    UxP.flat[mesh.mapWC] = state.bcUx.flat[mesh.mapWC]
-    UxP.flat[mesh.mapCC] = state.bcUx.flat[mesh.mapCC]
-    UyP.flat[mesh.mapIC] = state.bcUy.flat[mesh.mapIC]
-    UyP.flat[mesh.mapWC] = state.bcUy.flat[mesh.mapWC]
-    UyP.flat[mesh.mapCC] = state.bcUy.flat[mesh.mapCC]
-
-    # 6. Evaluate flux vectors at face nodes
-    fxUxM = UxM * UxM
-    fyUxM = UyM * UxM
-    fxUyM = UxM * UyM
-    fyUyM = UyM * UyM
-    fxUxP = UxP * UxP
-    fyUxP = UyP * UxP
-    fxUyP = UxP * UyP
-    fyUyP = UyP * UyP
-
-    # 7. Normal velocity and Lax-Friedrichs/Rusonov flux
-    UDotNM = UxM * mesh.nx + UyM * mesh.ny
-    UDotNP = UxP * mesh.nx + UyP * mesh.ny
-    maxvel = np.maximum(np.abs(UDotNM), np.abs(UDotNP))
-
-    # 8. Evaluate maximum normal velocity over each face
-    for f in range(mesh.Nfaces):
-        maxvel[f * mesh.Nfp : (f + 1) * mesh.Nfp, :] = np.max(
-            maxvel[f * mesh.Nfp : (f + 1) * mesh.Nfp, :], axis=0
-        )
-
-    # 9. Form Fluxes
-    fluxUx = 0.5 * (
-        -mesh.nx * (fxUxM - fxUxP) - mesh.ny * (fyUxM - fyUxP) - maxvel * (UxP - UxM)
-    )
-    fluxUy = 0.5 * (
-        -mesh.nx * (fxUyM - fxUyP) - mesh.ny * (fyUyM - fyUyP) - maxvel * (UyP - UyM)
-    )
-
-    # 10. Combine volume and surface terms
-    # Use @ for matrix multiplication with LIFT
-    state.NUx = state.NUx + mesh.LIFT @ (mesh.Fscale * fluxUx)
-    state.NUy = state.NUy + mesh.LIFT @ (mesh.Fscale * fluxUy)
-
-    # 11. Compute intermediate velocity (U~, V~)
-    state.UxT = (
-        (ss.a0 * state.Ux + ss.a1 * state.Uxold)
-        - state.dt * (ss.b0 * state.NUx + ss.b1 * NUxold)
-    ) / ss.g0
-    state.UyT = (
-        (ss.a0 * state.Uy + ss.a1 * state.Uyold)
-        - state.dt * (ss.b0 * state.NUy + ss.b1 * NUyold)
-    ) / ss.g0
-
-
-def ins2d_pressure(mesh, state, ss):
-    DivUT = Div2D(mesh, state.UxT, state.UyT)
-
-    # 2. Compute dp/dn components
-    CurlU = Curl2D(mesh, state.Ux, state.Uy)
-    dCurlUdx, dCurlUdy = Grad2D(mesh, CurlU)
-
-    res1 = -state.NUx - ss.nu * dCurlUdy
-    res2 = -state.NUy + ss.nu * dCurlUdx
-
-    # 3. Save old and compute new dp/dn
-    dpdnold = state.dpdn.copy()
-
-    # 4. Deciding Neumann nodes (Concatenating boundary maps)
-    nbcmapD = np.concatenate([mesh.mapIC, mesh.mapWC, mesh.mapCC])
-    vbcmapD = np.concatenate([mesh.vmapIC, mesh.vmapWC, mesh.vmapCC])
-
-    # dpdn(nbcmapD) = nx.*res1 + ny.*res2
-    state.dpdn = np.zeros_like(state.dpdn)
-    state.dpdn.flat[nbcmapD] = (
-        mesh.nx.flat[nbcmapD] * res1.flat[vbcmapD]
-        + mesh.ny.flat[nbcmapD] * res2.flat[vbcmapD]
-    )
-
-    # Update and subtract boundary forcing
-    state.dpdn -= state.bcdUndt
-
-    # 5. Evaluate RHS for Pressure Poisson Equation
-    term_vol = mesh.J * (-DivUT * ss.g0 / state.dt)
-    term_sur = mesh.LIFT @ (mesh.sJ * (ss.b0 * state.dpdn + ss.b1 * dpdnold))
-    PRrhs = mesh.MassMatrix @ (term_vol + term_sur)
-
-    # 6. Add Dirichlet boundary forcing
-    PRrhs_flat = PRrhs.ravel(order="F") + state.rhsbcPR.ravel(order="F")
-    PRrhs_flat = PRrhs_flat[ss.PRperm]
-
-    # 7. Pressure Solve (Assuming PRperm, PRsystemCT, PRsystemC are pre-computed)
-    global system_solve_time, system_solve_cnt
-    t0 = time.perf_counter()
-    tmp = spsolve_triangular(ss.PRsystemC.T, PRrhs_flat, lower=True)
-    PR_sol = spsolve_triangular(ss.PRsystemC, tmp, lower=False)
-    t1 = time.perf_counter()
-    system_solve_time += t1 - t0
-    system_solve_cnt += 1
-
-    # Reconstruct PR array using the permutation
-    PR = np.empty_like(PR_sol)
-    PR[ss.PRperm] = PR_sol
-    PR = PR.reshape((mesh.Np, mesh.K), order="F")
-
-    # 8. Compute (U~~, V~~) = (U~, V~) - dt*grad PR
-    dPRdx, dPRdy = Grad2D(mesh, PR)
-
-    # 9. Increment to (Ux~~, Uy~~)
-    state.UxTT = state.UxT - state.dt * (dPRdx) / ss.g0
-    state.UyTT = state.UyT - state.dt * (dPRdy) / ss.g0
-
-
-def ins2d_viscous(mesh, state, ss):
-    J_mean = np.mean(mesh.J, axis=0)
-
-    mmUxTT = J_mean * (mesh.MassMatrix @ state.UxTT)
-    mmUyTT = J_mean * (mesh.MassMatrix @ state.UyTT)
-
-    # 2. Formulate the full RHS for the Helmholtz system
-    Uxrhs_flat = (ss.g0 * mmUxTT.ravel(order="F")) / (
-        ss.nu * state.dt
-    ) + state.rhsbcUx.ravel(order="F")
-    Uyrhs_flat = (ss.g0 * mmUyTT.ravel(order="F")) / (
-        ss.nu * state.dt
-    ) + state.rhsbcUy.ravel(order="F")
-
-    # 3. Save current velocity to old variables
-    state.Uxold = state.Ux.copy()
-    state.Uyold = state.Uy.copy()
-
-    # Backsolve twice (Assuming VELsystemCT and VELsystemC are the factored matrices)
-    Uxrhs_flat = Uxrhs_flat[ss.VELperm]
-    Uyrhs_flat = Uyrhs_flat[ss.VELperm]
-    global system_solve_time, system_solve_cnt
-    t0 = time.perf_counter()
-    tmp_x = spsolve_triangular(ss.VELsystemC.T, Uxrhs_flat, lower=True)
-    Ux_sol = spsolve_triangular(ss.VELsystemC, tmp_x, lower=False)
-    tmp_y = spsolve_triangular(ss.VELsystemC.T, Uyrhs_flat, lower=True)
-    Uy_sol = spsolve_triangular(ss.VELsystemC, tmp_y, lower=False)
-    t1 = time.perf_counter()
-    system_solve_time += t1 - t0
-    system_solve_cnt += 2
-
-    # Update the state variables
-    tmp_Ux = np.empty_like(Ux_sol)
-    tmp_Ux[ss.VELperm] = Ux_sol
-    state.Ux = tmp_Ux.reshape((mesh.Np, mesh.K), order="F")
-    tmp_Uy = np.empty_like(Uy_sol)
-    tmp_Uy[ss.VELperm] = Uy_sol
-    state.Uy = tmp_Uy.reshape((mesh.Np, mesh.K), order="F")
 
 
 def load(file_path, load_static=False):
@@ -394,19 +178,19 @@ def load(file_path, load_static=False):
         return state
 
 
-def compare(state, state_ref):
-    for field in dir(state_ref):
-        if field.startswith("__"):
-            continue
+@jax.jit
+def u_time_fn(time):
+    return jnp.sin(jnp.pi * time / 8)
 
-        try:
-            v = getattr(state, field)
-            vr = getattr(state_ref, field)
-            diff = np.max(np.abs(v - vr))
-            print(f"{field:12}: {diff < 1e-12} {diff:.4e}")
-        except:
-            pass
-    print("===============================")
+
+@jax.jit
+def du_time_fn(time):
+    return (jnp.pi / 8) * jnp.cos(jnp.pi * time / 8)
+
+
+@jax.jit
+def p_time_fn(time):
+    return (jnp.pi / 8) * jnp.cos(jnp.pi * time / 8)
 
 
 if __name__ == "__main__":
@@ -428,6 +212,7 @@ if __name__ == "__main__":
     problem = IncompressibleNavierStokes(mesh_ops, params)
 
     def test(a, b):
+        assert a.shape == b.shape
         err = np.max(np.abs(a - b))
         print(f"Max difference: {err: .2e} | {err < 1e-10}")
 
@@ -437,26 +222,101 @@ if __name__ == "__main__":
 
     test(mesh_ops.ref_elem_ops.Dphi[0], mesh_matlab.Dr)
     test(mesh_ops.ref_elem_ops.Dphi[1], mesh_matlab.Ds)
-    test(mesh_ops.J_rst_xyz[0, 0], mesh_matlab.rx)
-    test(mesh_ops.J_rst_xyz[1, 0], mesh_matlab.sx)
-    test(mesh_ops.J_rst_xyz[0, 1], mesh_matlab.ry)
-    test(mesh_ops.J_rst_xyz[1, 1], mesh_matlab.sy)
-    test(mesh_ops.vmap_m.flat, mesh_matlab.vmapMC)
-    test(mesh_ops.vmap_p.flat, mesh_matlab.vmapPC)
-    test(np.where(mesh_ops.bc_maps[11].flat)[0], np.sort(mesh_matlab.mapIC))
-    test(np.where(mesh_ops.bc_maps[13].flat)[0], np.sort(mesh_matlab.mapWC))
-    test(np.where(mesh_ops.bc_maps[14].flat)[0], np.sort(mesh_matlab.mapCC))
+    test(mesh_ops.J_rst_xyz[0, 0], mesh_matlab.rx[0])
+    test(mesh_ops.J_rst_xyz[1, 0], mesh_matlab.sx[0])
+    test(mesh_ops.J_rst_xyz[0, 1], mesh_matlab.ry[0])
+    test(mesh_ops.J_rst_xyz[1, 1], mesh_matlab.sy[0])
+    test(mesh_ops.vmap_m.flatten(), mesh_matlab.vmapMC)
+    test(mesh_ops.vmap_p.flatten(), mesh_matlab.vmapPC)
+    test(np.where(mesh_ops.bc_maps[11].flatten())[0], np.sort(mesh_matlab.mapIC))
+    test(np.where(mesh_ops.bc_maps[13].flatten())[0], np.sort(mesh_matlab.mapWC))
+    test(np.where(mesh_ops.bc_maps[14].flatten())[0], np.sort(mesh_matlab.mapCC))
     test(mesh_ops.nxyz[0], mesh_matlab.nx)
     test(mesh_ops.nxyz[1], mesh_matlab.ny)
     test(mesh_ops.fscale.reshape((-1, mesh_ops.K)), mesh_matlab.Fscale)
     test(mesh_ops.ref_elem_ops.lift, mesh_matlab.LIFT)
-    test(mesh_ops.J, mesh_matlab.J)
+    test(mesh_ops.J, mesh_matlab.J[0])
     test(mesh_ops.sJ.reshape((-1, mesh_ops.K)), mesh_matlab.sJ)
     test(mesh_ops.ref_elem_ops.int_phiphi, mesh_matlab.MassMatrix)
 
     print("=" * 70)
 
-    for step in range(2, 20):
-        ins2d_step(mesh_matlab, static_state, state)
+    mesh_dims, mesh_data = mesh_ops.build_mesh_data()
+    bc_type_map = apply_bc_maps(
+        mesh_ops,
+        {
+            11: BC.Dirichlet,
+            13: BC.Dirichlet,
+            14: BC.Dirichlet,
+        },
+    )
+    mesh_data = mesh_data._replace(
+        vmap_m=mesh_data.vmap_m.reshape(-1, mesh_ops.K),
+        vmap_p=mesh_data.vmap_p.reshape(-1, mesh_ops.K),
+    )
+
+    jax_state = IncNavierStokesState(
+        u_old=jnp.stack([state.Uxold, state.Uyold], axis=0),
+        u=jnp.stack([state.Ux, state.Uy], axis=0),
+        bc_u=None,
+        bc_dudn=None,
+        rhs_bc_u=None,
+        p=None,
+        bc_p=None,
+        dpdn=jnp.array(state.dpdn),
+        rhs_bc_p=None,
+        Nu=jnp.stack([state.NUx, state.NUy], axis=0),
+        nu=jnp.array(static_state.nu),
+        time=jnp.array(state.time),
+        dt=jnp.array(state.dt),
+        timestep=state.tstep,
+        ref_bc_u=jnp.stack([static_state.refbcUx, static_state.refbcUy], axis=0),
+        ref_rhs_bc_u=jnp.stack(
+            [
+                static_state.refrhsbcUx.reshape(-1, mesh_dims.K, order="F"),
+                static_state.refrhsbcUy.reshape(-1, mesh_dims.K, order="F"),
+            ],
+            axis=0,
+        ),
+        ref_bc_p=jnp.array(static_state.refbcPR),
+        ref_rhs_bc_p=jnp.array(
+            static_state.refrhsbcPR.reshape(-1, mesh_dims.K, order="F")
+        ),
+        ref_bc_dudn=jnp.array(static_state.refbcdUndt),
+    )
+
+    for step in range(2, 10):
+        jax_state = _update_bc(jax_state, u_time_fn, du_time_fn, p_time_fn)
+
+        u_tilde, Nu = _advection_step(jax_state, mesh_data, bc_type_map, mesh_dims)
+        dpdn, uTT, p_new = _pressure_step(
+            jax_state, mesh_data, mesh_dims, u_tilde, Nu, bc_type_map, static_state
+        )
+        u_new = _viscous_step(jax_state, mesh_data, mesh_dims, uTT, static_state)
+
+        ####
+
+        jax_state = jax_state._replace(
+            u_old=jax_state.u,
+            u=u_new,
+            Nu=Nu,
+            time=jax_state.timestep * jax_state.dt,
+            timestep=jax_state.timestep + 1,
+            dpdn=dpdn,
+        )
+
+        ####
+
         state_ref = load(PATH + f"INS2D_N{N}_ts{step + 1}.mat")
-        compare(state, state_ref)
+
+        test(jax_state.u[0], state_ref.Ux)
+        test(jax_state.u[1], state_ref.Uy)
+        test(jax_state.Nu[0], state_ref.NUx)
+        test(jax_state.Nu[1], state_ref.NUy)
+        test(jax_state.dpdn, state_ref.dpdn)
+        test(state_ref.UxT, u_tilde[0])
+        test(state_ref.UyT, u_tilde[1])
+        test(state_ref.UxTT, uTT[0])
+        test(state_ref.UyTT, uTT[1])
+
+        print("================================")

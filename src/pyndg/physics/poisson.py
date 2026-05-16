@@ -2,12 +2,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse
-import operator
-from functools import reduce
 from functools import partial
 
 from pyndg.mesh.bc import BC
 import pyndg.backend as bkd
+from pyndg.ops.meshops import apply_bc_maps
 
 
 @jax.jit
@@ -214,17 +213,7 @@ class Poisson:
 
         self.tau = params["penalty"]
         self.bc_tags_map = params["bc_tags"]
-        assert (0 not in self.bc_tags_map) or (
-            self.bc_tags_map[0] == BC.NONE
-        ), "Tag 0 is reserved for internal faces and must be mapped to BC.NONE"
-        # map mesh tag to BC type
-        self.bc_tags_map[0] = BC.NONE
-        # map BC type to mesh tag
-        self.bc_tags_map_rev = {}
-        for tag, bc in self.bc_tags_map.items():
-            if bc not in self.bc_tags_map_rev:
-                self.bc_tags_map_rev[bc] = []
-            self.bc_tags_map_rev[bc].append(tag)
+        self.bc_type_map = apply_bc_maps(mesh_ops, self.bc_tags_map)
 
     def _block_assemble(self):
         if self.is_block_assembled:
@@ -392,17 +381,12 @@ class Poisson:
 
         self.rhs = np.zeros((Np, K))
 
-        # TODO: generalize to 3D
-        empty_bc = np.zeros((Nfp * Nf, K), dtype=bool)
-
-        d_tags = self.bc_tags_map_rev.get(BC.Dirichlet, [])
-        map_d = reduce(operator.or_, [ops.bc_maps[tag] for tag in d_tags], empty_bc)
+        map_d = self.bc_type_map[BC.Dirichlet]
         self.u_dir = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)
         self.u_dir[map_d] = dir_fn(ops.fxyz[:, map_d])
         self.u_dir = self.u_dir.reshape(ops.Nf, Nfp, K)
 
-        n_tags = self.bc_tags_map_rev.get(BC.Neumann, [])
-        map_n = reduce(operator.or_, [ops.bc_maps[tag] for tag in n_tags], empty_bc)
+        map_n = self.bc_type_map[BC.Neumann]
         dudxyz = neu_fn(ops.fxyz[:, map_n])
         self.u_neu = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)
         self.u_neu[map_n] = sum([ops.nxyz[d, map_n] * dudxyz[d] for d in range(dim)])

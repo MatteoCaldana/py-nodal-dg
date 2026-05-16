@@ -15,12 +15,8 @@ TODO:
 
 - add ruff
 
+- write regression test for poisson 2D / 3D
 
-
-- check jax poisson 2d correctness
-- implement 3d poisson in numpy
-- check 3d np correctness
-- check 3d jax correctness
 - benchmark
 - poisson solvers (with cholmod+richardson and MG in jax)
 - ins

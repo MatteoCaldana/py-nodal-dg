@@ -5,7 +5,11 @@ from pyndg.mg.mg import build_prolongator_restrictor, mg_iter
 from pyndg.ops.meshops import MeshOps
 from pyndg.mesh.bc import BC
 from pyndg.mesh.mesh import Mesh
-from pyndg.physics.poisson import Poisson, block_assemble_kernel, block_assemble_kernel_v2
+from pyndg.physics.poisson import (
+    Poisson,
+    block_assemble_kernel,
+    block_assemble_kernel_v2,
+)
 from pyndg.utils.plot import plot_2d
 
 from pathlib import Path
@@ -35,7 +39,9 @@ def dir_fn(xyz):
 def neu_fn(xyz):
     k = freq * np.pi
     u = sol_fn(xyz)
-    return tuple(k * u * (np.cos(k * xyz[i]) / np.sin(k * xyz[i])) for i in range(len(xyz)))
+    return tuple(
+        k * u * (np.cos(k * xyz[i]) / np.sin(k * xyz[i])) for i in range(len(xyz))
+    )
 
 
 def rhs_fn(xyz):
@@ -67,10 +73,10 @@ def triangular_mesh(l):
         for j in range(l):
 
             # square corners
-            v0 = vid(i,     j)
+            v0 = vid(i, j)
             v1 = vid(i + 1, j)
             v2 = vid(i + 1, j + 1)
-            v3 = vid(i,     j + 1)
+            v3 = vid(i, j + 1)
 
             # split square into two triangles
             e2v.append([v0, v1, v2])
@@ -103,7 +109,7 @@ def main():
 
     print(f"Mass error: {np.max(np.abs(problem.mass_mat - data['M'])):.3e}")
     print(f"Stif error: {np.max(np.abs(problem.stiff_mat - data['A'])):.3e}")
-    data["rhs"] = data["rhs"].flatten(order="C" if data["rhs"].shape[1] == 1 else "F") 
+    data["rhs"] = data["rhs"].flatten(order="C" if data["rhs"].shape[1] == 1 else "F")
     print(f"RHS error: {np.max(np.abs(rhs.flatten(order='F') - data["rhs"])):.3e}")
 
     print(f"Solving {rhs.size}...")
@@ -125,7 +131,6 @@ def main_2d():
     mesh_path = home_path / "mesh" / "gambit" / "circA01.neu"
 
     mesh = read_mesh(mesh_path)
-
 
     mesh = Mesh(*triangular_mesh(400), None, None, None)
     mesh.face_tag = np.where(mesh.face_tag == 15, 1, mesh.face_tag)
@@ -326,4 +331,4 @@ def main_2d():
 
 
 if __name__ == "__main__":
-    main_2d()
+    main()

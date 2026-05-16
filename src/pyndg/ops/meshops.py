@@ -1,11 +1,14 @@
 from pyndg.mesh.mesh import LOCAL_FACE_TO_VERTEX
 from pyndg.ops.refelem import REF_NORMALS, ReferenceElementOps
+from pyndg.mesh.bc import BC
 import pyndg.backend as bkd
 
 from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+import operator
+from functools import reduce
 
 
 class MeshDims(NamedTuple):
@@ -37,6 +40,7 @@ class MeshData(NamedTuple):
     bary_coord: jax.Array
     fmasks: jax.Array
     face_int_phiphi: jax.Array
+    lift: jax.Array
     # mesh ops data
     xyz: jax.Array
     fxyz: jax.Array
@@ -50,14 +54,124 @@ class MeshData(NamedTuple):
     bc_maps: dict[int, jax.Array]
 
 
+def apply_bc_maps(ops, bc_tags_map):
+    assert (0 not in bc_tags_map) or (
+        bc_tags_map[0] == BC.NONE
+    ), "Tag 0 is reserved for internal faces and must be mapped to BC.NONE"
+    # map mesh tag to BC type
+    bc_tags_map[0] = BC.NONE
+    # map BC type to mesh tag
+    bc_tags_map_rev = {}
+    for tag, bc in bc_tags_map.items():
+        if bc not in bc_tags_map_rev:
+            bc_tags_map_rev[bc] = []
+        bc_tags_map_rev[bc].append(tag)
+
+    empty_bc = np.zeros((ops.Nfp * ops.Nf, ops.K), dtype=bool)
+    bc_type_map = {}
+    for bc_type in BC:
+        if bc_type == BC.NONE:
+            continue
+
+        n_tags = bc_tags_map_rev.get(bc_type, [])
+        bc_type_map[bc_type] = reduce(
+            operator.or_, [ops.bc_maps[tag] for tag in n_tags], empty_bc
+        )
+
+    return bc_type_map
+
+
 def find_permutation(a, b):
-    pa = np.argsort(a, kind='stable')
-    pb = np.argsort(b, kind='stable')
+    pa = np.argsort(a, kind="stable")
+    pb = np.argsort(b, kind="stable")
 
     p = np.empty_like(pb)
     p[pb] = pa
 
     return p
+
+
+@jax.jit
+def div(J_rst_xyz, Dphi, u):
+    """
+    Dphi      : (dim, Np, Np)         stacked reference derivative matrices
+    u         : (dim, Np, K)          vector field  (rank-1)
+              | (dim, dim, Np, K)     tensor field  (rank-2), divergence taken on axis 0
+    J_rst_xyz : (dim, dim, K)         J[i,j,k] = d(r_i)/d(x_j) at element k
+
+    Returns
+    -------
+    div_u : (Np, K)          rank-1 input → scalar field
+          | (dim, Np, K)     rank-2 input → vector field  (one div per row)
+    """
+    Np, K = u.shape[-2], u.shape[-1]
+    u4 = u.reshape(u.shape[0], -1, Np, K)  # (j, l, b, k),  l=1 for vectors
+    out = jnp.einsum("ijk, ipb, jlbk -> lpk", J_rst_xyz, Dphi, u4)  # (l, p, k)
+    return out.reshape(u.shape[1:])  # (Np,K) or (dim,Np,K)
+
+
+@jax.jit
+def grad(J_rst_xyz, Dphi, u):
+    """
+    Dphi      : (dim, Np, Np)      stacked reference derivative matrices
+    u         : (Np, K)            scalar field
+              | (dim, Np, K)       vector field
+    J_rst_xyz : (dim, dim, K)      J[i,j,k] = d(r_i)/d(x_j) at element k
+
+    Returns
+    -------
+    scalar → u_xyz : (dim, Np, K)          u_xyz[j]  = ∂u/∂x_j
+    vector → u_xyz : (dim, dim, Np, K) u_xyz[i, j]   = ∂u_i/∂x_j  (Jacobian)
+    """
+    if u.ndim == 2:
+        # scalar field
+        return jnp.einsum("ijk, ipb, bk -> jpk", J_rst_xyz, Dphi, u)
+
+    if u.ndim == 3:
+        # vector field: vmap scalar grad over components (axis 0)
+        return jax.vmap(lambda ui: grad(J_rst_xyz, Dphi, ui), in_axes=0)(u)
+
+    raise ValueError(f"Unsupported u shape: {u.shape}")
+
+
+@jax.jit
+def de(J_rst_xyz, Dphi, u, axis):
+    """
+    J_rst_xyz : (dim, dim, K)
+    Dphi      : (dim, Np, Np)
+    u         : (Np, K)
+    Returns   : (Np, K)   ∂u/∂x_{axis}
+    """
+    # Fix j=axis, contract over i and b only
+    J_col = J_rst_xyz[:, axis, :]  # (dim, K)
+    return jnp.einsum("ik, ipb, bk -> pk", J_col, Dphi, u)
+
+
+@jax.jit
+def curl(J_rst_xyz, Dphi, u):
+    if u.ndim == 2:
+        # 2D curl: curl(u) = du_y/dx - du_x/dy
+        du = grad(J_rst_xyz, Dphi, u)
+        return jnp.stack([du[1], -du[0]], axis=0)
+    if u.ndim == 3:
+        if u.shape[0] == 3:
+            # 3D curl: curl(u) = (du_z/dy - du_y/dz, du_x/dz - du_z/dx, du_y/dx - du_x/dy)
+            du = grad(J_rst_xyz, Dphi, u)
+            return jnp.stack(
+                [
+                    du[2, 1] - du[1, 2],
+                    du[0, 2] - du[2, 0],
+                    du[1, 0] - du[0, 1],
+                ],
+                axis=0,
+            )
+        elif u.shape[0] == 2:
+            # curl of a 2D vector field du_y/dx - du_x/dy
+            duydx = de(J_rst_xyz, Dphi, u[1], 0)
+            duxdy = de(J_rst_xyz, Dphi, u[0], 1)
+            return duydx - duxdy
+
+    raise ValueError(f"Unsupported u shape: {u.shape}")
 
 
 class MeshOps:
@@ -205,11 +319,8 @@ class MeshOps:
 
                 self.vmap_p[lfid, :, cid] = vid_p[id_p]
 
-        print("Cache size:", len(permutations_cache)    )
         # TODO: compute vmap_p, taking into account periodicity and boundary conditions
-        print(
-            "WARNING: vmap_p periodicity and boundary conditions not implemented yet."
-        )
+        print("WARNING: periodic boundary conditions not implemented yet.")
 
     def _compute_bc_nodal_maps(self):
         self.bc_maps = {}
@@ -219,9 +330,7 @@ class MeshOps:
             return
 
         tags = np.sort(np.unique(self.mesh.face_tag))
-        assert (
-            tags[0] == 0
-        ), "Mesh has no internal edges. Tag 0 is reserved for untagged faces."
+        assert tags[0] == 0, "No tags. Tag 0 is reserved for untagged faces."
         for tag in tags[1:]:
             map = np.zeros_like(self.vmap_m, dtype=bool)
             cell_ids, local_face_ids = np.where(self.mesh.face_tag == tag)
@@ -258,13 +367,14 @@ class MeshOps:
             face_int_phiphi=jnp.array(
                 self.ref_elem_ops.face_int_phiphi, dtype=bkd.jnp_prec
             ),
+            lift=jnp.array(self.ref_elem_ops.lift, dtype=bkd.jnp_prec),
             xyz=jnp.array(self.xyz, dtype=bkd.jnp_prec),
             fxyz=jnp.array(self.fxyz, dtype=bkd.jnp_prec),
             J=jnp.array(self.J, dtype=bkd.jnp_prec),
             J_rst_xyz=jnp.array(self.J_rst_xyz, dtype=bkd.jnp_prec),
             nxyz=jnp.array(self.nxyz, dtype=bkd.jnp_prec),
             sJ=jnp.array(self.sJ, dtype=bkd.jnp_prec),
-            fscale=jnp.array(self.fscale, dtype=bkd.jnp_prec),
+            fscale=jnp.array(self.fscale.reshape(-1, self.K), dtype=bkd.jnp_prec),
             vmap_m=jnp.array(self.vmap_m, dtype=jnp.int32),
             vmap_p=jnp.array(self.vmap_p, dtype=jnp.int32),
             bc_maps={
