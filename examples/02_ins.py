@@ -2,26 +2,21 @@ import jax
 
 from pyndg.mesh import read_mesh
 from pyndg.ops.meshops import MeshOps, apply_bc_maps
+from pyndg.physics import ins
 from pyndg.physics.ins import (
+    _SPLITTING_COEFFS,
     IncNavierStokesState,
     IncompressibleNavierStokes,
-    _advection_step,
-    _viscous_step,
-    _pressure_step,
-    _update_bc,
 )
 from pyndg.mesh.bc import BC
 
 from pathlib import Path
 import scipy.io
-from scipy.sparse.linalg import spsolve_triangular
 import numpy as np
 import jax.numpy as jnp
-import time
+from scipy.sparse.linalg import spsolve_triangular
 
 PATH = "/home/matteo/Documents/nodal-dg/Codes1.1/"
-
-system_solve_time, system_solve_cnt = 0, 0
 
 
 class State:
@@ -163,16 +158,15 @@ class Mesh:
                 setattr(self, var + "C", mapC)
 
 
-system_solve_time = 0
-system_solve_cnt = 0
-
-
 def load(file_path, load_static=False):
     data = scipy.io.loadmat(file_path)
     if load_static:
         static_state = StaticState(data)
-        mesh = Mesh(data)
-        return static_state, mesh
+        try:
+            mesh = Mesh(data)
+            return static_state, mesh
+        except:
+            return static_state, None
     else:
         state = State(data)
         return state
@@ -193,6 +187,44 @@ def p_time_fn(time):
     return (jnp.pi / 8) * jnp.cos(jnp.pi * time / 8)
 
 
+def u_bc(xyz, nxyz, maps):
+    u = jnp.zeros_like(xyz)
+    y_in = xyz[1] + 0.20
+    ux = jnp.where(maps[11], (1 / 0.41) ** 2 * 6 * y_in * (0.41 - y_in), 0)
+    u = u.at[0].set(ux)
+    return u
+
+
+def p_bc(xyz, nxyz, maps):
+    p = jnp.zeros(xyz.shape[1:])
+    return p
+
+
+@jax.jit
+def dudn_bc(xyz, nxyz, maps):
+    y_in = xyz[1] + 0.20
+    dudn = jnp.where(maps[11], -((1 / 0.41) ** 2) * 6 * y_in * (0.41 - y_in), 0)
+    return dudn
+
+
+@jax.jit
+def u_ic(xyz):
+    u = jnp.zeros_like(xyz)
+    return u
+
+
+@jax.jit
+def p_ic(xyz):
+    p = jnp.zeros(xyz.shape[1:])
+    return p
+
+
+def test(a, b):
+    assert a.shape == b.shape, f"{a.shape} != {b.shape}"
+    err = np.max(np.abs(a - b))
+    print(f"Max difference: {err: .2e} | {err < 1e-10}")
+
+
 if __name__ == "__main__":
     home_path = Path(__file__).resolve().parent.parent
     mesh_path = home_path / "mesh" / "gambit" / "cylinderA00075b.neu"
@@ -200,25 +232,46 @@ if __name__ == "__main__":
     mesh = read_mesh(mesh_path)
     # mesh.plot()
 
-    N = 5
+    N = 1
 
     mesh_ops = MeshOps(mesh, N)
     params = {
         "final_time": 8.0,
         "penalty": 20.0,
         "nu": 0.001,
-        "ic_fn": lambda xyz: np.zeros_like(xyz),
+        "u_ic": u_ic,
+        "p_ic": p_ic,
+        "u_bc": u_bc,
+        "p_bc": p_bc,
+        "dudn_bc": dudn_bc,
+        "u_time_scale": u_time_fn,
+        "du_time_scale": du_time_fn,
+        "p_time_scale": p_time_fn,
+        "bc_tags": {
+            11: BC.Dirichlet,
+            12: BC.Neumann,
+            13: BC.Dirichlet,
+            14: BC.Dirichlet,
+        },
     }
     problem = IncompressibleNavierStokes(mesh_ops, params)
-
-    def test(a, b):
-        assert a.shape == b.shape
-        err = np.max(np.abs(a - b))
-        print(f"Max difference: {err: .2e} | {err < 1e-10}")
+    Np, K = mesh_ops.Np, mesh_ops.K
 
     print(f"Loading reference mat N={N}")
     static_state, mesh_matlab = load(PATH + f"INS2D_N{N}_STATIC.mat", True)
-    state = load(PATH + f"INS2D_N{N}_ts2.mat")
+
+    PRperm_inv = np.empty_like(static_state.PRperm)
+    PRperm_inv[static_state.PRperm] = np.arange(len(PRperm_inv), dtype=np.int32)
+    PRsystem_org = static_state.PRsystem[PRperm_inv][:, PRperm_inv]
+
+    VELperm_inv = np.empty_like(static_state.VELperm)
+    VELperm_inv[static_state.VELperm] = np.arange(len(VELperm_inv), dtype=np.int32)
+    VELsystem_org = static_state.VELsystem[VELperm_inv][:, VELperm_inv]
+
+    test(np.array(problem.nu), np.array(static_state.nu))
+
+    test(problem.pr_sys, PRsystem_org)
+    test(problem.adv_sys_1, VELsystem_org)
 
     test(mesh_ops.ref_elem_ops.Dphi[0], mesh_matlab.Dr)
     test(mesh_ops.ref_elem_ops.Dphi[1], mesh_matlab.Ds)
@@ -241,82 +294,93 @@ if __name__ == "__main__":
 
     print("=" * 70)
 
-    mesh_dims, mesh_data = mesh_ops.build_mesh_data()
-    bc_type_map = apply_bc_maps(
-        mesh_ops,
-        {
-            11: BC.Dirichlet,
-            13: BC.Dirichlet,
-            14: BC.Dirichlet,
-        },
+    state0 = problem._build_initial_state()
+    mat_state0, _ = load(PATH + f"INS2D_N{N}_STATIC_PRESTAGE.mat", load_static=True)
+
+    test(state0.ref_rhs_bc_p, mat_state0.refrhsbcPR.reshape(-1, mesh_ops.K, order="F"))
+    test(
+        state0.ref_rhs_bc_u[0], mat_state0.refrhsbcUx.reshape(-1, mesh_ops.K, order="F")
     )
-    mesh_data = mesh_data._replace(
-        vmap_m=mesh_data.vmap_m.reshape(-1, mesh_ops.K),
-        vmap_p=mesh_data.vmap_p.reshape(-1, mesh_ops.K),
+    test(
+        state0.ref_rhs_bc_u[1], mat_state0.refrhsbcUy.reshape(-1, mesh_ops.K, order="F")
+    )
+    test(state0.ref_bc_p, mat_state0.refbcPR.reshape(-1, mesh_ops.K, order="F"))
+    test(state0.ref_bc_dudn, mat_state0.refbcdUndt.reshape(-1, mesh_ops.K, order="F"))
+    test(state0.ref_bc_u[0], mat_state0.refbcUx)
+    test(state0.ref_bc_u[1], mat_state0.refbcUy)
+
+    VELsystem_org = mat_state0.VELsystem[VELperm_inv][:, VELperm_inv]
+    test(problem.adv_sys_0, VELsystem_org)
+
+    ss = mat_state0
+
+    def pressure_solver(p_rhs):
+        p_rhs = p_rhs.flatten(order="F")[ss.PRperm]
+        tmp = spsolve_triangular(ss.PRsystemC.T, p_rhs, lower=True)
+        p_sol = spsolve_triangular(ss.PRsystemC, tmp, lower=False)
+        tmp[ss.PRperm] = p_sol
+        return tmp.reshape((Np, K), order="F")
+
+    def velocity_solver(u_rhs):
+        u_rhs_flat = u_rhs.flatten(order="F")[ss.VELperm]
+        tmp = spsolve_triangular(ss.VELsystemC.T, u_rhs_flat, lower=True)
+        u_sol = spsolve_triangular(ss.VELsystemC, tmp, lower=False)
+        tmp[ss.VELperm] = u_sol
+        return tmp.reshape((Np, K), order="F")
+
+    state = ins.step(
+        state0,
+        problem.mesh_data,
+        problem.mesh_dims,
+        problem.bc_type_map,
+        problem.params["u_time_scale"],
+        problem.params["du_time_scale"],
+        problem.params["p_time_scale"],
+        pressure_solver,
+        velocity_solver,
+        _SPLITTING_COEFFS["stage0"],
     )
 
-    jax_state = IncNavierStokesState(
-        u_old=jnp.stack([state.Uxold, state.Uyold], axis=0),
-        u=jnp.stack([state.Ux, state.Uy], axis=0),
-        bc_u=None,
-        bc_dudn=None,
-        rhs_bc_u=None,
-        p=None,
-        bc_p=None,
-        dpdn=jnp.array(state.dpdn),
-        rhs_bc_p=None,
-        Nu=jnp.stack([state.NUx, state.NUy], axis=0),
-        nu=jnp.array(static_state.nu),
-        time=jnp.array(state.time),
-        dt=jnp.array(state.dt),
-        timestep=state.tstep,
-        ref_bc_u=jnp.stack([static_state.refbcUx, static_state.refbcUy], axis=0),
-        ref_rhs_bc_u=jnp.stack(
-            [
-                static_state.refrhsbcUx.reshape(-1, mesh_dims.K, order="F"),
-                static_state.refrhsbcUy.reshape(-1, mesh_dims.K, order="F"),
-            ],
-            axis=0,
-        ),
-        ref_bc_p=jnp.array(static_state.refbcPR),
-        ref_rhs_bc_p=jnp.array(
-            static_state.refrhsbcPR.reshape(-1, mesh_dims.K, order="F")
-        ),
-        ref_bc_dudn=jnp.array(static_state.refbcdUndt),
-    )
+    print("=" * 70)
+
+    ss = static_state
+
+    def pressure_solver(p_rhs):
+        p_rhs = p_rhs.flatten(order="F")[ss.PRperm]
+        tmp = spsolve_triangular(ss.PRsystemC.T, p_rhs, lower=True)
+        p_sol = spsolve_triangular(ss.PRsystemC, tmp, lower=False)
+        tmp[ss.PRperm] = p_sol
+        return tmp.reshape((Np, K), order="F")
+
+    def velocity_solver(u_rhs):
+        u_rhs_flat = u_rhs.flatten(order="F")[ss.VELperm]
+        tmp = spsolve_triangular(ss.VELsystemC.T, u_rhs_flat, lower=True)
+        u_sol = spsolve_triangular(ss.VELsystemC, tmp, lower=False)
+        tmp[ss.VELperm] = u_sol
+        return tmp.reshape((Np, K), order="F")
 
     for step in range(2, 10):
-        jax_state = _update_bc(jax_state, u_time_fn, du_time_fn, p_time_fn)
-
-        u_tilde, Nu = _advection_step(jax_state, mesh_data, bc_type_map, mesh_dims)
-        dpdn, uTT, p_new = _pressure_step(
-            jax_state, mesh_data, mesh_dims, u_tilde, Nu, bc_type_map, static_state
-        )
-        u_new = _viscous_step(jax_state, mesh_data, mesh_dims, uTT, static_state)
-
-        ####
-
-        jax_state = jax_state._replace(
-            u_old=jax_state.u,
-            u=u_new,
-            Nu=Nu,
-            time=jax_state.timestep * jax_state.dt,
-            timestep=jax_state.timestep + 1,
-            dpdn=dpdn,
+        state = ins.step(
+            state,
+            problem.mesh_data,
+            problem.mesh_dims,
+            problem.bc_type_map,
+            problem.params["u_time_scale"],
+            problem.params["du_time_scale"],
+            problem.params["p_time_scale"],
+            pressure_solver,
+            velocity_solver,
+            _SPLITTING_COEFFS["stage1"],
         )
 
         ####
 
         state_ref = load(PATH + f"INS2D_N{N}_ts{step + 1}.mat")
 
-        test(jax_state.u[0], state_ref.Ux)
-        test(jax_state.u[1], state_ref.Uy)
-        test(jax_state.Nu[0], state_ref.NUx)
-        test(jax_state.Nu[1], state_ref.NUy)
-        test(jax_state.dpdn, state_ref.dpdn)
-        test(state_ref.UxT, u_tilde[0])
-        test(state_ref.UyT, u_tilde[1])
-        test(state_ref.UxTT, uTT[0])
-        test(state_ref.UyTT, uTT[1])
+        test(state_ref.Ux, state.u[0])
+        test(state_ref.Uy, state.u[1])
+        test(state_ref.NUx, state.Nu[0])
+        test(state_ref.NUy, state.Nu[1])
+        test(state_ref.dpdn, state.dpdn)
 
         print("================================")

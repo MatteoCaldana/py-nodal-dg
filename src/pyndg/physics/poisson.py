@@ -203,9 +203,9 @@ def block_assemble_kernel_v2(mesh_data, penalty, dims):
 
 
 class Poisson:
-    def __init__(self, params, mesh_ops):
-        self.params = params
+    def __init__(self, mesh_ops, params):
         self.mesh_ops = mesh_ops
+        self.params = params
 
         self.is_block_assembled = False
         self.is_assembled_rhs = False
@@ -364,8 +364,8 @@ class Poisson:
 
         self.is_assembled = True
 
-    def assemble_rhs(self, rhs_fn, dir_fn, neu_fn):
-        if self.is_assembled_rhs:
+    def assemble_rhs(self, rhs_fn, bc_fn, force_assemble=False):
+        if self.is_assembled_rhs and (not force_assemble):
             return self.rhs
 
         ops = self.mesh_ops
@@ -381,15 +381,16 @@ class Poisson:
 
         self.rhs = np.zeros((Np, K))
 
+        bc_eval = bc_fn(ops.fxyz, ops.nxyz, ops.bc_maps)
+
         map_d = self.bc_type_map[BC.Dirichlet]
         self.u_dir = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)
-        self.u_dir[map_d] = dir_fn(ops.fxyz[:, map_d])
+        self.u_dir[map_d] = bc_eval[map_d]
         self.u_dir = self.u_dir.reshape(ops.Nf, Nfp, K)
 
         map_n = self.bc_type_map[BC.Neumann]
-        dudxyz = neu_fn(ops.fxyz[:, map_n])
         self.u_neu = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)
-        self.u_neu[map_n] = sum([ops.nxyz[d, map_n] * dudxyz[d] for d in range(dim)])
+        self.u_neu[map_n] = bc_eval[map_n]
         self.u_neu = self.u_neu.reshape(ops.Nf, Nfp, K)
 
         for cid in range(K):
@@ -420,7 +421,7 @@ class Poisson:
                             gtau * mmE[:, Fm1] - Dn1.T @ mmE[:, Fm1]
                         ) @ self.u_dir[lfid, :, cid]
                     case BC.Neumann:
-                        self.rhs[:, cid] += mmE[:, Fm1] * self.u_neu[lfid, :, cid]
+                        self.rhs[:, cid] += mmE[:, Fm1] @ self.u_neu[lfid, :, cid]
                     case BC.NONE:
                         pass
                     case _:
