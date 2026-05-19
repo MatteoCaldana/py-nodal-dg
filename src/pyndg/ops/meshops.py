@@ -188,19 +188,21 @@ class MeshOps:
 
         self._build()
         print("MeshOps initialized")
+        print(f"  Total nodes: {self.Np * self.K}")
+        print(f"  Face nodes:  {self.Nfp * self.Nf * self.K}")
 
     def _build(self):
-        print("Building mesh nodes...")
+        print("   Building mesh nodes...")
         self._compute_nodes_coordiantes()
-        print("Building face nodes...")
+        print("   Building face nodes...")
         self._compute_face_coordinates()
-        print("Building geometric factors...")
+        print("   Building geometric factors...")
         self._compute_geometric_factors()
-        print("Building normals...")
+        print("   Building normals...")
         self._compute_normals()
-        print("Building nodal maps...")
+        print("   Building nodal maps...")
         self._compute_nodal_maps()
-        print("Building BC nodal maps...")
+        print("   Building BC nodal maps...")
         self._compute_bc_nodal_maps()
 
     def _compute_nodes_coordiantes(self):

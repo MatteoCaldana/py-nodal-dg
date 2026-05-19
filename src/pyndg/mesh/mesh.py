@@ -197,8 +197,7 @@ def reorder_cells(connectivity_edges, K):
     new_adj = adj[perm, :][:, perm]
     new_bw = get_bandwidth(new_adj)
 
-    print("Old bandwidth:", old_bw)
-    print("New bandwidth:", new_bw)
+    print(f"   Possible bandwidth reduction: {old_bw} -> {new_bw}")
     return perm
 
 
@@ -432,7 +431,7 @@ class Mesh:
         self._build_connectivity_edges_map()
         print("   Reordering cells to minimize bandwidth...")
         reorder_cells(self.connectivity_edges, self.K)
-        print("  Computing inradius...")
+        print("   Computing inradius...")
         self._compute_inradius()
 
         print("Mesh initialized")

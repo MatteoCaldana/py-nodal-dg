@@ -1,19 +1,17 @@
+import time
+from sksparse.cholmod import cho_factor
 import jax
-
-from pyndg.mesh import read_mesh
-from pyndg.ops.meshops import MeshOps
-from pyndg.physics import ins
-from pyndg.physics.ins import (
-    _SPLITTING_COEFFS,
-    IncompressibleNavierStokes,
-)
-from pyndg.mesh.bc import BC
-
 from pathlib import Path
 import scipy.io
 import numpy as np
 import jax.numpy as jnp
 from scipy.sparse.linalg import spsolve
+
+from pyndg.mesh import read_mesh
+from pyndg.ops.meshops import MeshOps
+from pyndg.physics import ins
+from pyndg.physics.ins import _SPLITTING_COEFFS, IncompressibleNavierStokes
+from pyndg.mesh.bc import BC
 
 PATH = "/home/matteo/Documents/nodal-dg/Codes1.1/"
 
@@ -59,7 +57,7 @@ def du_time_fn(time):
 def p_time_fn(time):
     return (jnp.pi / 8) * jnp.cos(jnp.pi * time / 8)
 
-
+@jax.jit
 def u_bc(xyz, nxyz, maps):
     u = jnp.zeros_like(xyz)
     y_in = xyz[1] + 0.20
@@ -67,7 +65,7 @@ def u_bc(xyz, nxyz, maps):
     u = u.at[0].set(ux)
     return u
 
-
+@jax.jit
 def p_bc(xyz, nxyz, maps):
     p = jnp.zeros(xyz.shape[1:])
     return p
@@ -105,7 +103,7 @@ if __name__ == "__main__":
     mesh = read_mesh(mesh_path)
     # mesh.plot()
 
-    N = 5
+    N = 8
 
     mesh_ops = MeshOps(mesh, N)
     params = {
@@ -132,20 +130,24 @@ if __name__ == "__main__":
 
     state0 = problem._build_initial_state()
 
+    cho_factor_pr = cho_factor(problem.pr_sys.tocsc(), order="amd")
+    cho_factor_vel_0 = cho_factor(problem.adv_sys_0.tocsc(), order="amd")
+    cho_factor_vel_1 = cho_factor(problem.adv_sys_1.tocsc(), order="amd")
+
     def pressure_solver(p_rhs):
         p_rhs = p_rhs.flatten(order="F")
-        p_sol = spsolve(problem.pr_sys, p_rhs)
+        p_sol = cho_factor_pr.solve(np.array(p_rhs))
         return p_sol.reshape((Np, K), order="F")
 
-    def velocity_solver_0(p_rhs):
-        p_rhs = p_rhs.flatten(order="F")
-        p_sol = spsolve(problem.adv_sys_0, p_rhs)
-        return p_sol.reshape((Np, K), order="F")
+    def velocity_solver_0(rhs):
+        rhs = rhs.flatten(order="F")
+        sol = cho_factor_vel_0.solve(np.array(rhs))
+        return sol.reshape((Np, K), order="F")
 
-    def velocity_solver_1(p_rhs):
-        p_rhs = p_rhs.flatten(order="F")
-        p_sol = spsolve(problem.adv_sys_1, p_rhs)
-        return p_sol.reshape((Np, K), order="F")
+    def velocity_solver_1(rhs):
+        rhs = rhs.flatten(order="F")
+        sol = cho_factor_vel_1.solve(np.array(rhs))
+        return sol.reshape((Np, K), order="F")
 
     state = ins.step(
         state0,
@@ -162,7 +164,10 @@ if __name__ == "__main__":
 
     print("=" * 70)
 
-    for step in range(2, 20):
+    total_time = 0.0
+    nsteps = 100
+    for step in range(2, nsteps):
+        t0 = time.perf_counter()
         state = ins.step(
             state,
             problem.mesh_data,
@@ -175,15 +180,26 @@ if __name__ == "__main__":
             velocity_solver_1,
             _SPLITTING_COEFFS["stage1"],
         )
+        state.u.block_until_ready()
+        t1 = time.perf_counter()
+        total_time += t1 - t0
 
         ####
 
-        state_ref = load(PATH + f"INS2D_N{N}_ts{step + 1}.mat")
+        if False:
+            state_ref = load(PATH + f"INS2D_N{N}_ts{step + 1}.mat")
 
-        test(state_ref.Ux, state.u[0])
-        test(state_ref.Uy, state.u[1])
-        test(state_ref.NUx, state.Nu[0])
-        test(state_ref.NUy, state.Nu[1])
-        # test(state_ref.dpdn, state.dpdn)
+            test(state_ref.Ux, state.u[0])
+            test(state_ref.Uy, state.u[1])
+            test(state_ref.NUx, state.Nu[0])
+            test(state_ref.NUy, state.Nu[1])
+            # test(state_ref.dpdn, state.dpdn)
 
-        print("================================")
+            print("================================")
+
+    print(f"Total time: {total_time:.4f} seconds")
+    print(f"Pressure solve time: {ins._pressure_solve_time:.4f} seconds")
+    print(f"Velocity solve time: {ins._velocity_solve_time:.4f} seconds")
+    print(
+        f"Non-solve time: {total_time - ins._pressure_solve_time - ins._velocity_solve_time:.4f} seconds"
+    )

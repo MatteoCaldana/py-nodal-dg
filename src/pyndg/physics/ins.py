@@ -1,5 +1,5 @@
 from functools import partial
-
+import time
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -76,6 +76,11 @@ def _setup_pressure_and_velocity(mesh_ops, params):
     return mass, pr_sys, pr_rhs, vel_sys, vel_rhs
 
 
+_calls = 0
+_pressure_solve_time = 0.0
+_velocity_solve_time = 0.0
+
+
 def step(
     state,
     mesh_data,
@@ -88,19 +93,22 @@ def step(
     velocity_solver,
     coeffs,
 ):
+    global _pressure_solve_time, _velocity_solve_time, _calls
     state = _update_bc(state, u_time_fn, du_time_fn, p_time_fn)
     u_tilde, Nu = _advection_step(state, mesh_data, bc_type_map, mesh_dims, coeffs)
-    dpdn, uTT, p_new = _pressure_step(
-        state,
-        mesh_data,
-        mesh_dims,
-        u_tilde,
-        Nu,
-        bc_type_map,
-        pressure_solver,
-        coeffs,
+    dpdn, u_tilde, p_rhs = _pressure_step(
+        state, mesh_data, mesh_dims, u_tilde, Nu, bc_type_map, coeffs
     )
-    u_new = _viscous_step(state, mesh_data, mesh_dims, uTT, velocity_solver, coeffs)
+    t0 = time.perf_counter()
+    p_new = pressure_solver(p_rhs)
+    t1 = time.perf_counter()
+    _pressure_solve_time += t1 - t0
+    u_rhs = _viscous_step(state, mesh_data, u_tilde, p_new, coeffs)
+    t0 = time.perf_counter()
+    u_new = jnp.stack([velocity_solver(u_rhs[d]) for d in range(mesh_dims.dim)])
+    t1 = time.perf_counter()
+    _velocity_solve_time += t1 - t0
+    _calls += 1
     return state._replace(
         u_old=state.u,
         u=u_new,
@@ -112,6 +120,7 @@ def step(
     )
 
 
+@partial(jax.jit, static_argnames=["u_time_fn", "du_time_fn", "p_time_fn"])
 def _update_bc(state, u_time_fn, du_time_fn, p_time_fn):
     tfu = u_time_fn(state.time)
     tfu_new = u_time_fn(state.time + state.dt)
@@ -127,7 +136,7 @@ def _update_bc(state, u_time_fn, du_time_fn, p_time_fn):
     )
 
 
-# @partial(jax.jit, static_argnames=["Nfp", "Nfaces"])
+@partial(jax.jit, static_argnames=["mesh_dims"])
 def _advection_step(state, mesh_ops, bc_type_map, mesh_dims, coeffs):
     # evaluate flux vector
     F = state.u[:, None] * state.u[None, :]
@@ -139,7 +148,7 @@ def _advection_step(state, mesh_ops, bc_type_map, mesh_dims, coeffs):
 
     # apply BCs
     d_mask = bc_type_map[BC.Dirichlet]
-    uP = uP.at[:, d_mask].set(state.bc_u[:, d_mask])
+    uP = jnp.where(d_mask[None, ...], state.bc_u, uP)
 
     FP = uP[:, None] * uP[None, :]
     FM = uM[:, None] * uM[None, :]
@@ -172,9 +181,8 @@ def _advection_step(state, mesh_ops, bc_type_map, mesh_dims, coeffs):
     return u_tilde, Nu
 
 
-def _pressure_step(
-    state, mesh_ops, mesh_dims, u_tilde, Nu, bc_type_map, solver, coeffs
-):
+@partial(jax.jit, static_argnames=["mesh_dims"])
+def _pressure_step(state, mesh_ops, mesh_dims, u_tilde, Nu, bc_type_map, coeffs):
     div_u_tilde = div(mesh_ops.J_rst_xyz, mesh_ops.Dphi, u_tilde)
 
     # Compute dp/dn components
@@ -185,9 +193,8 @@ def _pressure_step(
     # On Neumann nodes (Dirichlet on u):
     # dpdn(nbcmapD) = - n \dot (Du/Dt + nu curl curl u)
     d_mask = bc_type_map[BC.Dirichlet]
-    dpdn = np.zeros_like(state.dpdn)
-    res_on_face = res.reshape(mesh_dims.dim, -1)[:, mesh_ops.vmap_m[d_mask]]
-    dpdn[d_mask] = -jnp.einsum("di,di->i", mesh_ops.nxyz[:, d_mask], res_on_face)
+    res_on_face = res.reshape(mesh_dims.dim, -1)[:, mesh_ops.vmap_m]
+    dpdn = jnp.where(d_mask, -jnp.einsum("dij,dij->ij", mesh_ops.nxyz, res_on_face), 0)
 
     # Update and subtract boundary forcing
     dpdn -= state.bc_dudn
@@ -200,27 +207,22 @@ def _pressure_step(
 
     # Add Dirichlet boundary forcing
     p_rhs += state.rhs_bc_p
+    return dpdn, u_tilde, p_rhs
 
-    # Pressure Solve
-    p_new = solver(p_rhs)
 
+@jax.jit
+def _viscous_step(state, mesh_ops, u_tilde, p_new, coeffs):
     # Compute (U~~, V~~) = (U~, V~) - dt*grad PR
     dp = grad(mesh_ops.J_rst_xyz, mesh_ops.Dphi, p_new)
 
     # Increment to (Ux~~, Uy~~)
-    uTT = u_tilde - state.dt * dp / coeffs.g0
-    return dpdn, uTT, p_new
+    u_tilde_2 = u_tilde - state.dt * dp / coeffs.g0
 
-
-def _viscous_step(state, mesh_ops, mesh_dims, uTT, solver, coeffs):
-    mmUTT = mesh_ops.J * (mesh_ops.int_phiphi @ uTT)
+    mmUTT = mesh_ops.J * (mesh_ops.int_phiphi @ u_tilde_2)
 
     # Formulate the full RHS for the Helmholtz system
     u_rhs = (coeffs.g0 * mmUTT) / (state.nu * state.dt) + state.rhs_bc_u
-
-    # Solve system
-    u_new = [solver(u_rhs[d]) for d in range(mesh_dims.dim)]
-    return jnp.stack(u_new)
+    return u_rhs
 
 
 class IncompressibleNavierStokes:
@@ -271,6 +273,12 @@ class IncompressibleNavierStokes:
             vmap_p=self.mesh_data.vmap_p.reshape(-1, mesh_ops.K),
         )
 
+        print("Incompressible Navier-Stokes solver initialized:")
+        print(f"  Final time: {params['final_time']}")
+        print(f"  Time step: {self.dt:.4e}")
+        print(f"  Number of steps: {self.nsteps}")
+        print(f"  Viscosity: {self.nu:.4e}")
+
     def _build_initial_state(self):
         return IncNavierStokesState(
             u_old=jnp.zeros_like(self.u, dtype=bkd.jnp_prec),
@@ -296,7 +304,7 @@ class IncompressibleNavierStokes:
             ref_bc_dudn=jnp.array(self.dudn_bc, dtype=bkd.jnp_prec),
         )
 
-    def run(self):
+    def run(self, pressure_solver, velocity_solver_0, velocity_solver_1):
         state = self._build_initial_state()
 
         state = step(
@@ -308,7 +316,7 @@ class IncompressibleNavierStokes:
             self.params["du_time_scale"],
             self.params["p_time_scale"],
             pressure_solver,
-            velocity_solver,
+            velocity_solver_0,
             _SPLITTING_COEFFS["stage0"],
         )
 
@@ -322,7 +330,7 @@ class IncompressibleNavierStokes:
                 self.params["du_time_scale"],
                 self.params["p_time_scale"],
                 pressure_solver,
-                velocity_solver,
+                velocity_solver_1,
                 _SPLITTING_COEFFS["stage1"],
             )
 

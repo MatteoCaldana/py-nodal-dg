@@ -1,22 +1,21 @@
 TODO:
-- basic operations in higher precision to use high order with more precision
+infra:
+- add ruff
 
+mesh:
 - gmsh in python
-
 - test mesh 2d periodic gmsh
 - test mesh 1d
-
-- jax sparse utils
-- Poisson 3D, correctness check
-- jax.scan assembly loop
-- local h-refinement
 - test mesh global h-refinement
 - test mesh reorder
 
-- add ruff
+core:
+- jax sparse utils
+- jax.scan assembly loop with block
 
-- write regression test for poisson 2D / 3D
+experimental:
+- local h-refinement
 
-- benchmark
-- poisson solvers (with cholmod+richardson and MG in jax)
-- ins
+physics:
+- ins poisson solvers (with cholmod+richardson and MG in jax)
+- shockless euler
