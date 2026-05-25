@@ -120,14 +120,13 @@ def mesh_reader_gambit(file_name):
     # 1. Parse Dimensions (Node count and Element count)
     # Typically found on line 7 (index 6)
     dims = np.fromstring(lines[6], sep=" ", dtype=int)
-    Nv, K, NGRPS, NBSETS, NDFCD, NDFVL = dims[0:6]
+    Nv, K, NGRPS, NBSETS, NDFCD, _ = dims[0:6]
     print("Gambit Mesh info:")
     print(f"  # of vertices: {Nv}")
     print(f"  # of elements: {K}")
     print(f"  # of element groups: {NGRPS}")
     print(f"  # of boundary sets: {NBSETS}")
     print(f"  # of coordinate dimensions: {NDFCD}")
-    print(f"  # of velocity components: {NDFVL}")
 
     # 2. Read Node Coordinates
     VXY = np.zeros((Nv, NDFCD), dtype=np.float64)

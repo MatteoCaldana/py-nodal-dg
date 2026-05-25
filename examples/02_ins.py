@@ -57,6 +57,7 @@ def du_time_fn(time):
 def p_time_fn(time):
     return (jnp.pi / 8) * jnp.cos(jnp.pi * time / 8)
 
+
 @jax.jit
 def u_bc(xyz, nxyz, maps):
     u = jnp.zeros_like(xyz)
@@ -64,6 +65,7 @@ def u_bc(xyz, nxyz, maps):
     ux = jnp.where(maps[11], (1 / 0.41) ** 2 * 6 * y_in * (0.41 - y_in), 0)
     u = u.at[0].set(ux)
     return u
+
 
 @jax.jit
 def p_bc(xyz, nxyz, maps):

@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
@@ -9,16 +7,16 @@ import pyndg.backend as bkd
 class TimeIntegrator(ABC):
     @staticmethod
     @abstractmethod
-    def integrate(u, dt, f):
+    def integrate(u, dt, f, postproc=lambda x: x):
         pass
 
 
 class SSP3(TimeIntegrator):
     @staticmethod
-    def integrate(u, dt, f):
-        u1 = u + dt * f(u)
-        u2 = (3 * u + u1 + dt * f(u1)) / 4
-        return (u + 2 * u2 + 2 * dt * f(u2)) / 3
+    def integrate(u, dt, f, postproc=lambda x: x):
+        u1 = postproc(u + dt * f(u))
+        u2 = postproc((3 * u + u1 + dt * f(u1)) / 4)
+        return postproc((u + 2 * u2 + 2 * dt * f(u2)) / 3)
 
 
 class LS54(TimeIntegrator):
@@ -44,10 +42,10 @@ class LS54(TimeIntegrator):
     )
 
     @staticmethod
-    def integrate(u, dt, f):
+    def integrate(u, dt, f, postproc=lambda x: x):
         v = jnp.zeros_like(u)
         for i in range(5):
             y = f(u)
             v = LS54.A[i] * v + dt * y
-            u = u + LS54.B[i] * v
+            u = postproc(u + LS54.B[i] * v)
         return u
