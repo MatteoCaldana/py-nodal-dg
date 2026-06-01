@@ -114,6 +114,9 @@ class ReferenceElementOps:
         # mass matrix
         self.int_phiphi = self.invV.T @ self.invV
         self.int_phiphi_inv = self.V @ self.V.T
+        
+        ref_measure = 2**dim / math.factorial(dim)
+        self.avg_phi = np.sum(self.int_phiphi, axis=0) / ref_measure
 
         # strong form differentiation matrix (Dr, Ds, Dt)
         self.Dphi = dmatrices(dim, N, self.rst, self.V)

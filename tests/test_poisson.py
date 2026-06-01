@@ -16,7 +16,7 @@ def sol_fn(xyz):
 
 def bc_fn(xyz, nxyz, maps):
     bc_eval = np.zeros(xyz.shape[1:])
-    bc_eval[maps[1]] = sol_fn(xyz[:, maps[1]])
+    bc_eval.flat[maps[1]] = sol_fn(xyz.reshape(xyz.shape[0], -1)[:, maps[1]])
     return bc_eval
 
 

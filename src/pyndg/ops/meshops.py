@@ -32,6 +32,7 @@ class MeshData(NamedTuple):
     V: jax.Array
     invV: jax.Array
     int_phiphi: jax.Array
+    avg_phi: jax.Array
     int_phiphi_inv: jax.Array
     Dphi: jax.Array
     int_phiDphi: jax.Array
@@ -357,6 +358,7 @@ class MeshOps:
             V=jnp.array(self.ref_elem_ops.V, dtype=bkd.jnp_prec),
             invV=jnp.array(self.ref_elem_ops.invV, dtype=bkd.jnp_prec),
             int_phiphi=jnp.array(self.ref_elem_ops.int_phiphi, dtype=bkd.jnp_prec),
+            avg_phi=jnp.array(self.ref_elem_ops.avg_phi, dtype=bkd.jnp_prec),
             int_phiphi_inv=jnp.array(
                 self.ref_elem_ops.int_phiphi_inv, dtype=bkd.jnp_prec
             ),
@@ -380,6 +382,6 @@ class MeshOps:
             vmap_m=jnp.array(self.vmap_m, dtype=jnp.int32),
             vmap_p=jnp.array(self.vmap_p, dtype=jnp.int32),
             bc_maps={
-                tag: jnp.array(map, dtype=bool) for tag, map in self.bc_maps.items()
+                tag: jnp.where(map.flatten())[0] for tag, map in self.bc_maps.items()
             },
         )

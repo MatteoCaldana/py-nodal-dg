@@ -380,8 +380,8 @@ class Poisson:
         dim = ops.dim
 
         self.rhs = np.zeros((Np, K))
-
-        bc_eval = bc_fn(ops.fxyz, ops.nxyz, ops.bc_maps)
+        bc_maps = {int(tag): np.where(map.flatten())[0] for tag, map in ops.bc_maps.items()}
+        bc_eval = bc_fn(ops.fxyz, ops.nxyz, bc_maps)
 
         map_d = self.bc_type_map[BC.Dirichlet]
         self.u_dir = np.zeros((Nfp * Nf, K), dtype=ops.xyz.dtype)

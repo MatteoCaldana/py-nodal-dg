@@ -32,11 +32,12 @@ def p_time_fn(time):
 
 @jax.jit
 def u_bc(xyz, nxyz, maps):
-    u = jnp.zeros_like(xyz)
-    y_in = xyz[1] + 0.20
-    ux = jnp.where(maps[11], (1 / 0.41) ** 2 * 6 * y_in * (0.41 - y_in), 0)
-    u = u.at[0].set(ux)
-    return u
+    map_in = maps[11]
+    y_in = xyz[1].reshape(-1)[map_in] + 0.20
+    ux = (1 / 0.41) ** 2 * 6 * y_in * (0.41 - y_in)
+    u = jnp.zeros((xyz.shape[0], xyz.shape[1] * xyz.shape[2]))
+    u = u.at[0, map_in].set(ux)
+    return u.reshape(xyz.shape)
 
 
 @jax.jit
@@ -47,9 +48,11 @@ def p_bc(xyz, nxyz, maps):
 
 @jax.jit
 def dudn_bc(xyz, nxyz, maps):
-    y_in = xyz[1] + 0.20
-    dudn = jnp.where(maps[11], -((1 / 0.41) ** 2) * 6 * y_in * (0.41 - y_in), 0)
-    return dudn
+    map_in = maps[11]
+    y_in = xyz[1].reshape(-1)[map_in] + 0.20
+    dudn = jnp.zeros(xyz.shape[1] * xyz.shape[2])
+    dudn = dudn.at[map_in].set(-((1 / 0.41) ** 2) * 6 * y_in * (0.41 - y_in))
+    return dudn.reshape(xyz.shape[1:])
 
 
 @jax.jit

@@ -3,7 +3,6 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 from pathlib import Path
 
-from pyndg.mesh.bc import BC
 from pyndg.mesh.reader import read_gmsh_file_2d, mesh_reader_gambit
 
 LOCAL_FACE_TO_VERTEX = {
@@ -540,3 +539,111 @@ class Mesh:
         plt.legend(loc="upper right", bbox_to_anchor=(1.25, 1))
         plt.tight_layout()
         plt.show()
+
+    _LOCAL_EDGES = {
+        1: np.array([[0, 1]]),
+        2: np.array([[0, 1], [1, 2], [2, 0]]),
+        3: np.array([[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]),
+    }
+
+    def refine(self):
+        """
+        Refines the mesh uniformly exactly 1 time.
+        Supports 1D (segments), 2D (triangles), and 3D (tetrahedra).
+        Returns a new refined Mesh object.
+        """
+        print("Refining mesh uniformly...")
+
+        # Define local edges for each simplex type
+        local_edges = self._LOCAL_EDGES[self.dim]
+        num_edges_per_elem = local_edges.shape[0]
+
+        # 1. Extract and identify all unique topological edges in the mesh
+        all_edges = self.e2v[:, local_edges].reshape(-1, 2)
+        sorted_edges = np.sort(all_edges, axis=1)
+        unique_edges, inverse_indices = np.unique(
+            sorted_edges, axis=0, return_inverse=True
+        )
+
+        # 2. Create new vertices (midpoints of unique edges)
+        midpoints = 0.5 * (
+            self.vxyz[unique_edges[:, 0]] + self.vxyz[unique_edges[:, 1]]
+        )
+        new_vxyz = np.vstack([self.vxyz, midpoints])
+
+        # Global indices of the new midpoints for each element
+        m_ids = self.Nv + inverse_indices.reshape(self.K, num_edges_per_elem)
+        old_t = self.face_tag
+
+        # 3. Create new elements and map boundary tags
+        if self.dim == 1:
+            v0, v1 = self.e2v[:, 0], self.e2v[:, 1]
+            m01 = m_ids[:, 0]
+
+            new_e2v = np.empty((self.K * 2, 2), dtype=self.e2v.dtype)
+            new_e2v[0::2] = np.column_stack((v0, m01))
+            new_e2v[1::2] = np.column_stack((m01, v1))
+
+            new_tags = np.zeros((self.K * 2, 2), dtype=old_t.dtype)
+            new_tags[0::2, 0] = old_t[:, 0]
+            new_tags[1::2, 1] = old_t[:, 1]
+
+        elif self.dim == 2:
+            v0, v1, v2 = self.e2v[:, 0], self.e2v[:, 1], self.e2v[:, 2]
+            m01, m12, m02 = m_ids[:, 0], m_ids[:, 1], m_ids[:, 2]
+
+            new_e2v = np.empty((self.K * 4, 3), dtype=self.e2v.dtype)
+            new_e2v[0::4] = np.column_stack((v0, m01, m02))
+            new_e2v[1::4] = np.column_stack((m01, v1, m12))
+            new_e2v[2::4] = np.column_stack((m02, m12, v2))
+            new_e2v[3::4] = np.column_stack((m01, m12, m02))
+
+            new_tags = np.zeros((self.K * 4, 3), dtype=old_t.dtype)
+            new_tags[0::4, 0] = old_t[:, 0]
+            new_tags[0::4, 2] = old_t[:, 2]
+            new_tags[1::4, 0] = old_t[:, 0]
+            new_tags[1::4, 1] = old_t[:, 1]
+            new_tags[2::4, 1] = old_t[:, 1]
+            new_tags[2::4, 2] = old_t[:, 2]
+            # [3::4] remains all zeros (internal faces)
+
+        elif self.dim == 3:
+            v0, v1, v2, v3 = (
+                self.e2v[:, 0],
+                self.e2v[:, 1],
+                self.e2v[:, 2],
+                self.e2v[:, 3],
+            )
+            m01, m02, m03 = m_ids[:, 0], m_ids[:, 1], m_ids[:, 2]
+            m12, m13, m23 = m_ids[:, 3], m_ids[:, 4], m_ids[:, 5]
+
+            # Standard 1:8 decomposition matching original tetrahedra orientation
+            new_e2v = np.empty((self.K * 8, 4), dtype=self.e2v.dtype)
+            new_e2v[0::8] = np.column_stack((v0, m01, m02, m03))
+            new_e2v[1::8] = np.column_stack((m01, v1, m12, m13))
+            new_e2v[2::8] = np.column_stack((m02, m12, v2, m23))
+            new_e2v[3::8] = np.column_stack((m03, m13, m23, v3))
+            new_e2v[4::8] = np.column_stack((m01, m13, m02, m03))
+            new_e2v[5::8] = np.column_stack((m01, m02, m13, m12))
+            new_e2v[6::8] = np.column_stack((m02, m03, m13, m23))
+            new_e2v[7::8] = np.column_stack((m02, m13, m12, m23))
+
+            new_tags = np.zeros((self.K * 8, 4), dtype=old_t.dtype)
+            new_tags[0::8, 0] = old_t[:, 0]
+            new_tags[0::8, 1] = old_t[:, 1]
+            new_tags[0::8, 3] = old_t[:, 3]
+            new_tags[1::8, 0] = old_t[:, 0]
+            new_tags[1::8, 1] = old_t[:, 1]
+            new_tags[1::8, 2] = old_t[:, 2]
+            new_tags[2::8, 0] = old_t[:, 0]
+            new_tags[2::8, 2] = old_t[:, 2]
+            new_tags[2::8, 3] = old_t[:, 3]
+            new_tags[3::8, 1] = old_t[:, 1]
+            new_tags[3::8, 2] = old_t[:, 2]
+            new_tags[3::8, 3] = old_t[:, 3]
+            new_tags[4::8, 1] = old_t[:, 1]
+            new_tags[5::8, 0] = old_t[:, 0]
+            new_tags[6::8, 3] = old_t[:, 3]
+            new_tags[7::8, 2] = old_t[:, 2]
+
+        return Mesh(new_vxyz, new_e2v, new_tags, None, None)
