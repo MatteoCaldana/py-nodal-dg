@@ -5,13 +5,14 @@ from pathlib import Path
 import scipy.io
 import numpy as np
 import jax.numpy as jnp
-from scipy.sparse.linalg import spsolve
+import matplotlib.pyplot as plt
 
 from pyndg.mesh import read_mesh
 from pyndg.ops.meshops import MeshOps
 from pyndg.physics import ins
 from pyndg.physics.ins import _SPLITTING_COEFFS, IncompressibleNavierStokes
 from pyndg.mesh.bc import BC
+from pyndg.utils.plot import plot_2d
 
 PATH = "/home/matteo/Documents/nodal-dg/Codes1.1/"
 
@@ -60,11 +61,12 @@ def p_time_fn(time):
 
 @jax.jit
 def u_bc(xyz, nxyz, maps):
-    u = jnp.zeros_like(xyz)
-    y_in = xyz[1] + 0.20
-    ux = jnp.where(maps[11], (1 / 0.41) ** 2 * 6 * y_in * (0.41 - y_in), 0)
-    u = u.at[0].set(ux)
-    return u
+    map_in = maps[11]
+    y_in = xyz[1].reshape(-1)[map_in] + 0.20
+    ux = (1 / 0.41) ** 2 * 6 * y_in * (0.41 - y_in)
+    u = jnp.zeros((xyz.shape[0], xyz.shape[1] * xyz.shape[2]))
+    u = u.at[0, map_in].set(ux)
+    return u.reshape(xyz.shape)
 
 
 @jax.jit
@@ -75,9 +77,11 @@ def p_bc(xyz, nxyz, maps):
 
 @jax.jit
 def dudn_bc(xyz, nxyz, maps):
-    y_in = xyz[1] + 0.20
-    dudn = jnp.where(maps[11], -((1 / 0.41) ** 2) * 6 * y_in * (0.41 - y_in), 0)
-    return dudn
+    map_in = maps[11]
+    y_in = xyz[1].reshape(-1)[map_in] + 0.20
+    dudn = jnp.zeros(xyz.shape[1] * xyz.shape[2])
+    dudn = dudn.at[map_in].set(-((1 / 0.41) ** 2) * 6 * y_in * (0.41 - y_in))
+    return dudn.reshape(xyz.shape[1:])
 
 
 @jax.jit
@@ -98,6 +102,19 @@ def test(a, b):
     print(f"Max difference: {err: .2e} | {err < 1e-10}")
 
 
+def plot(axs, meshops, state):
+    axs[0, 0].set_title("Velocity x")
+    axs[0, 1].set_title("Velocity y")
+    axs[1, 0].set_title("Velocity magnitude")
+    axs[1, 1].set_title("Pressure")
+    plot_2d(meshops, state.u[0], ax=axs[0, 0])
+    plot_2d(meshops, state.u[1], ax=axs[0, 1])
+    plot_2d(meshops, jnp.linalg.norm(state.u, axis=0), ax=axs[1, 0])
+    plot_2d(meshops, state.p, ax=axs[1, 1])
+
+    plt.pause(0.01)
+
+
 if __name__ == "__main__":
     home_path = Path(__file__).resolve().parent.parent
     mesh_path = home_path / "mesh" / "gambit" / "cylinderA00075b.neu"
@@ -105,7 +122,7 @@ if __name__ == "__main__":
     mesh = read_mesh(mesh_path)
     # mesh.plot()
 
-    N = 8
+    N = 5
 
     mesh_ops = MeshOps(mesh, N)
     params = {
@@ -166,8 +183,11 @@ if __name__ == "__main__":
 
     print("=" * 70)
 
+    fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+    plot(axs, mesh_ops, state)
+
     total_time = 0.0
-    nsteps = 100
+    nsteps = 10000
     for step in range(2, nsteps):
         t0 = time.perf_counter()
         state = ins.step(
@@ -186,22 +206,12 @@ if __name__ == "__main__":
         t1 = time.perf_counter()
         total_time += t1 - t0
 
-        ####
-
-        if False:
-            state_ref = load(PATH + f"INS2D_N{N}_ts{step + 1}.mat")
-
-            test(state_ref.Ux, state.u[0])
-            test(state_ref.Uy, state.u[1])
-            test(state_ref.NUx, state.Nu[0])
-            test(state_ref.NUy, state.Nu[1])
-            # test(state_ref.dpdn, state.dpdn)
-
-            print("================================")
+        if step % 100 == 0:
+            print(f"Step {step}/{nsteps} | Time: {state.time:.4f} seconds")
+            plot(axs, mesh_ops, state)
 
     print(f"Total time: {total_time:.4f} seconds")
     print(f"Pressure solve time: {ins._pressure_solve_time:.4f} seconds")
     print(f"Velocity solve time: {ins._velocity_solve_time:.4f} seconds")
-    print(
-        f"Non-solve time: {total_time - ins._pressure_solve_time - ins._velocity_solve_time:.4f} seconds"
-    )
+    non_solve_time = total_time - ins._pressure_solve_time - ins._velocity_solve_time
+    print(f"Non-solve time: {non_solve_time:.4f} seconds")

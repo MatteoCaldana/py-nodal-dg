@@ -17,5 +17,10 @@ experimental:
 - local h-refinement
 
 physics:
+- poisson kernel review (clean code)
 - ins poisson solvers (with cholmod+richardson and MG in jax)
 - shockless euler
+
+- euler unit test
+- euler limiter
+- euler viscosity
